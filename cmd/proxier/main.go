@@ -51,7 +51,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	proxyCh := make(chan []*models.Proxy, 100)
+	proxyCh := make(chan *models.Proxy, 2000)
 
 	go func() {
 		v.Run(ctx, proxyCh)

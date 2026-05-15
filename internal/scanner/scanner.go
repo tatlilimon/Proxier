@@ -49,7 +49,7 @@ func NewScanner(sources []models.SourceConfig, interval time.Duration) *Scanner 
 // start and then repeats on each interval tick. Every run deduplicates
 // discovered proxies and sends only the new batch to output. The loop exits
 // when ctx is cancelled.
-func (s *Scanner) Run(ctx context.Context, output chan<- []*models.Proxy) {
+func (s *Scanner) Run(ctx context.Context, output chan<- *models.Proxy) {
 	seen := make(map[string]bool)
 
 	// Initial fetch.
@@ -71,7 +71,7 @@ func (s *Scanner) Run(ctx context.Context, output chan<- []*models.Proxy) {
 // runOnce fetches every source, deduplicates the combined result, and sends
 // the new proxies downstream. Failures from individual sources are logged and
 // skipped.
-func (s *Scanner) runOnce(ctx context.Context, output chan<- []*models.Proxy, seen map[string]bool) {
+func (s *Scanner) runOnce(ctx context.Context, output chan<- *models.Proxy, seen map[string]bool) {
 	start := time.Now()
 	now := start
 
@@ -98,14 +98,13 @@ func (s *Scanner) runOnce(ctx context.Context, output chan<- []*models.Proxy, se
 	s.lastDurationMs = time.Since(start).Milliseconds()
 	s.totalDiscovered += int64(len(newProxies))
 	s.mu.Unlock()
-	if len(newProxies) == 0 {
-		return
-	}
 
-	select {
-	case <-ctx.Done():
-		return
-	case output <- newProxies:
+	for _, p := range newProxies {
+		select {
+		case <-ctx.Done():
+			return
+		case output <- p:
+		}
 	}
 }
 

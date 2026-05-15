@@ -103,7 +103,7 @@ Returns a single working proxy, selected by weighted random (favors high health 
   "latency_ms": 312,
   "health_score": 0.87,
   "country": "DE",
-  "last_checked": "2024-11-15T14:22:00Z"
+  "last_checked": "2026-05-15T14:22:00Z"
 }
 ```
 
@@ -152,7 +152,7 @@ Runtime statistics about the service.
     "success_rate_pct": 8.9, "avg_latency_ms": 388
   },
   "uptime": "2h3m15s",
-  "version": "1.1.0"
+  "version": "1.2.0"
 }
 ```
 

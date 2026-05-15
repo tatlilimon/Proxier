@@ -58,10 +58,10 @@ func NewValidator(cfg models.ValidatorConfig, pool Pool) *Validator {
 	}
 }
 
-// Run starts the validator worker pool. It reads batches of proxies from input,
-// validates each one, and keeps the shared pool up to date. Run returns when
-// the input channel is closed and all workers have finished.
-func (v *Validator) Run(ctx context.Context, input <-chan []*models.Proxy) error {
+// Run starts the validator worker pool. It reads proxies from the input
+// channel, validates each one, and keeps the shared pool up to date.
+// Run returns when the input channel is closed and all workers have finished.
+func (v *Validator) Run(ctx context.Context, input <-chan *models.Proxy) error {
 	var wg sync.WaitGroup
 
 	for i := 0; i < v.workers; i++ {
@@ -72,18 +72,11 @@ func (v *Validator) Run(ctx context.Context, input <-chan []*models.Proxy) error
 				select {
 				case <-ctx.Done():
 					return
-				case batch, ok := <-input:
+				case p, ok := <-input:
 					if !ok {
 						return
 					}
-					for _, p := range batch {
-						select {
-						case <-ctx.Done():
-							return
-						default:
-							v.validateOne(ctx, p)
-						}
-					}
+					v.validateOne(ctx, p)
 				}
 			}
 		}()
