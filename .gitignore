@@ -1,0 +1,26 @@
+# Binaries
+/proxier
+/cmd/proxier/proxier
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+
+# Config (local overrides)
+config.local.yaml
+config.local.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local

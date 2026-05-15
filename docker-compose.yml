@@ -1,0 +1,21 @@
+services:
+  proxier:
+    build: .
+    container_name: proxier
+    ports:
+      - "8080:8080"
+    volumes:
+      - proxier_data:/data
+    environment:
+      - PORT=8080
+      - STORAGE_PATH=/data/proxies.db
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  proxier_data:
