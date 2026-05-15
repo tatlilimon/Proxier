@@ -155,7 +155,13 @@ func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {
 		v.handleFailure(p)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("validator: %s returned HTTP %d", p.Address(), resp.StatusCode)
+		v.handleFailure(p)
+		return
+	}
 
 	p.LatencyMs = int(latency.Milliseconds())
 	p.ConsecutiveOK++
