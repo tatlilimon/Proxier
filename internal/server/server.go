@@ -154,29 +154,21 @@ func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	alive, validating, _ := s.pool.Stats()
-	deadLastHour := s.pool.LastHourDead()
+	poolStats := s.pool.DetailedStats()
 
-	lastRun, nextRun, sourceCount := s.scanner.Stats()
-	checkedLastHour, avgLatencyMs := s.validator.Stats()
+	scannerStats := s.scanner.DetailedStats()
+	validatorStats := s.validator.DetailedStats()
+
+	uptimeSec := int64(time.Since(s.startTime).Seconds())
+	uptime := (time.Duration(uptimeSec) * time.Second).String()
 
 	resp := models.StatsResponse{
-		Pool: models.PoolStats{
-			Alive:        alive,
-			Validating:   validating,
-			DeadLastHour: deadLastHour,
-		},
-		Scanner: models.ScannerStats{
-			LastRun:      lastRun,
-			NextRun:      nextRun,
-			SourcesCount: sourceCount,
-		},
-		Validator: models.ValidatorStats{
-			Workers:         0,
-			CheckedLastHour: checkedLastHour,
-			AvgLatencyMs:    avgLatencyMs,
-		},
-		UptimeSec: int64(time.Since(s.startTime).Seconds()),
+		Pool:      poolStats,
+		Scanner:   scannerStats,
+		Validator: validatorStats,
+		UptimeSec: uptimeSec,
+		Uptime:    uptime,
+		Version:   "1.0.0",
 	}
 
 	writeJSON(w, http.StatusOK, resp)

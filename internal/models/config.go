@@ -75,27 +75,40 @@ type StatsResponse struct {
 	Scanner   ScannerStats   `json:"scanner"`
 	Validator ValidatorStats `json:"validator"`
 	UptimeSec int64          `json:"uptime_seconds"`
+	Uptime    string         `json:"uptime"`
+	Version   string         `json:"version"`
 }
 
 // PoolStats holds pool-level statistics.
 type PoolStats struct {
-	Alive        int `json:"alive"`
-	Validating   int `json:"validating"`
-	DeadLastHour int `json:"dead_last_hour"`
+	Total          int            `json:"total"`
+	Alive          int            `json:"alive"`
+	Validating     int            `json:"validating"`
+	Dead           int            `json:"dead"`
+	Discovered     int            `json:"discovered"`
+	DeadLastHour   int            `json:"dead_last_hour"`
+	AvgHealthScore float64        `json:"avg_health_score"`
+	Protocols      map[string]int `json:"protocols"`
 }
 
 // ScannerStats holds scanner statistics.
 type ScannerStats struct {
-	LastRun      time.Time `json:"last_run"`
-	NextRun      time.Time `json:"next_run"`
-	SourcesCount int       `json:"sources_count"`
+	LastRun         time.Time `json:"last_run"`
+	NextRun         time.Time `json:"next_run"`
+	SourcesCount    int       `json:"sources_count"`
+	LastFetchCount  int       `json:"last_fetch_count"`
+	TotalDiscovered int64     `json:"total_discovered"`
+	LastDurationMs  int64     `json:"last_duration_ms"`
 }
 
 // ValidatorStats holds validator statistics.
 type ValidatorStats struct {
-	Workers          int     `json:"workers"`
-	CheckedLastHour  int64   `json:"checked_last_hour"`
-	AvgLatencyMs     float64 `json:"avg_latency_ms"`
+	Workers      int     `json:"workers"`
+	TotalChecks  int64   `json:"total_checks"`
+	SuccessCount int64   `json:"success_count"`
+	FailureCount int64   `json:"failure_count"`
+	SuccessRate  float64 `json:"success_rate_pct"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
 }
 
 // ValidateRequest is the request body for POST /validate.

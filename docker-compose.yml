@@ -10,6 +10,7 @@ services:
       - PORT=8080
       - STORAGE_PATH=/data/proxies.db
       - LOG_LEVEL=info
+      - VALIDATOR_PROBE_URL=https://httpbin.org/ip
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]

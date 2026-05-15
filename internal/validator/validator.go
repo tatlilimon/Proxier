@@ -36,6 +36,8 @@ type Validator struct {
 
 	checked      atomic.Int64
 	totalLatency atomic.Int64
+	successCount atomic.Int64
+	failureCount atomic.Int64
 }
 
 // NewValidator creates a Validator with the given configuration and pool.
@@ -172,6 +174,7 @@ func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {
 
 	v.checked.Add(1)
 	v.totalLatency.Add(latency.Milliseconds())
+	v.successCount.Add(1)
 
 	v.pool.Add(p)
 }
@@ -182,6 +185,7 @@ func (v *Validator) handleFailure(p *models.Proxy) {
 	p.ConsecutiveFail++
 	p.LastChecked = time.Now()
 	v.checked.Add(1)
+	v.failureCount.Add(1)
 
 	if p.ConsecutiveFail >= v.maxFails {
 		p.State = models.StateDead
@@ -265,4 +269,26 @@ func (v *Validator) Stats() (checkedLastHour int64, avgLatencyMs float64) {
 		return 0, 0
 	}
 	return checked, float64(totalLat) / float64(checked)
+}
+
+// DetailedStats returns comprehensive validator statistics.
+func (v *Validator) DetailedStats() models.ValidatorStats {
+	checked := v.checked.Load()
+	success := v.successCount.Load()
+	failure := v.failureCount.Load()
+
+	var avgLat, rate float64
+	if checked > 0 {
+		avgLat = float64(v.totalLatency.Load()) / float64(checked)
+		rate = float64(success) / float64(checked) * 100
+	}
+
+	return models.ValidatorStats{
+		Workers:      v.workers,
+		TotalChecks:  checked,
+		SuccessCount: success,
+		FailureCount: failure,
+		SuccessRate:  rate,
+		AvgLatencyMs: avgLat,
+	}
 }

@@ -25,9 +25,12 @@ type Scanner struct {
 	httpClient *http.Client
 	interval   time.Duration
 
-	mu      sync.Mutex
-	lastRun time.Time
-	nextRun time.Time
+	mu              sync.Mutex
+	lastRun         time.Time
+	nextRun         time.Time
+	lastFetchCount  int
+	lastDurationMs  int64
+	totalDiscovered int64
 }
 
 // NewScanner creates a new Scanner with the given proxy sources and scan
@@ -69,7 +72,8 @@ func (s *Scanner) Run(ctx context.Context, output chan<- []*models.Proxy) {
 // the new proxies downstream. Failures from individual sources are logged and
 // skipped.
 func (s *Scanner) runOnce(ctx context.Context, output chan<- []*models.Proxy, seen map[string]bool) {
-	now := time.Now()
+	start := time.Now()
+	now := start
 
 	s.mu.Lock()
 	s.lastRun = now
@@ -88,6 +92,12 @@ func (s *Scanner) runOnce(ctx context.Context, output chan<- []*models.Proxy, se
 	}
 
 	newProxies := s.deduplicate(all, seen)
+
+	s.mu.Lock()
+	s.lastFetchCount = len(all)
+	s.lastDurationMs = time.Since(start).Milliseconds()
+	s.totalDiscovered += int64(len(newProxies))
+	s.mu.Unlock()
 	if len(newProxies) == 0 {
 		return
 	}
@@ -253,4 +263,18 @@ func (s *Scanner) Stats() (lastRun time.Time, nextRun time.Time, sourceCount int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastRun, s.nextRun, len(s.sources)
+}
+
+// DetailedStats returns comprehensive scanner statistics.
+func (s *Scanner) DetailedStats() models.ScannerStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return models.ScannerStats{
+		LastRun:         s.lastRun,
+		NextRun:         s.nextRun,
+		SourcesCount:    len(s.sources),
+		LastFetchCount:  s.lastFetchCount,
+		TotalDiscovered: s.totalDiscovered,
+		LastDurationMs:  s.lastDurationMs,
+	}
 }

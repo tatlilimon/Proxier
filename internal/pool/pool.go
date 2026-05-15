@@ -213,6 +213,46 @@ func (p *Pool) Stats() (alive int, validating int, dead int) {
 	return
 }
 
+// DetailedStats returns comprehensive pool statistics in a single lock
+// acquisition.
+func (p *Pool) DetailedStats() models.PoolStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	cutoff := time.Now().Add(-1 * time.Hour)
+	var stats models.PoolStats
+	stats.Protocols = make(map[string]int)
+
+	var healthSum float64
+	aliveCount := 0
+
+	for _, proxy := range p.proxies {
+		stats.Total++
+		switch proxy.State {
+		case models.StateAlive:
+			stats.Alive++
+			aliveCount++
+			healthSum += proxy.HealthScore
+			stats.Protocols[string(proxy.Protocol)]++
+		case models.StateValidating:
+			stats.Validating++
+		case models.StateDead:
+			stats.Dead++
+			if proxy.LastChecked.After(cutoff) {
+				stats.DeadLastHour++
+			}
+		case models.StateDiscovered:
+			stats.Discovered++
+		}
+	}
+
+	if aliveCount > 0 {
+		stats.AvgHealthScore = healthSum / float64(aliveCount)
+	}
+
+	return stats
+}
+
 // LastHourDead returns the count of proxies that transitioned to DEAD
 // within the last hour.
 func (p *Pool) LastHourDead() int {
