@@ -135,10 +135,24 @@ Runtime statistics about the service.
 
 ```json
 {
-  "pool": { "alive": 142, "validating": 38, "dead_last_hour": 23 },
-  "scanner": { "last_run": "...", "next_run": "...", "sources_count": 14 },
-  "validator": { "workers": 0, "checked_last_hour": 310, "avg_latency_ms": 388 },
-  "uptime_seconds": 7402
+  "pool": {
+    "alive": 142, "validating": 38, "dead_last_hour": 23,
+    "total": 1003, "dead": 417, "discovered": 0,
+    "avg_health_score": 0.64,
+    "protocols": { "http": 98, "socks5": 44 }
+  },
+  "scanner": {
+    "last_run": "...", "next_run": "...", "sources_count": 14,
+    "last_fetch_count": 43200, "total_discovered": 21500,
+    "last_duration_ms": 3800
+  },
+  "validator": {
+    "workers": 20, "total_checks": 1580,
+    "success_count": 142, "failure_count": 1438,
+    "success_rate_pct": 8.9, "avg_latency_ms": 388
+  },
+  "uptime": "2h3m15s",
+  "version": "1.1.0"
 }
 ```
 

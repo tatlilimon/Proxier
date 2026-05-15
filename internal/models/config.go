@@ -74,8 +74,7 @@ type StatsResponse struct {
 	Pool      PoolStats      `json:"pool"`
 	Scanner   ScannerStats   `json:"scanner"`
 	Validator ValidatorStats `json:"validator"`
-	UptimeSec int64          `json:"uptime_seconds"`
-	Uptime    string         `json:"uptime"`
+	Uptime  string         `json:"uptime"`
 	Version   string         `json:"version"`
 }
 

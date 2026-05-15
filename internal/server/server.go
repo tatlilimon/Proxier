@@ -160,15 +160,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	validatorStats := s.validator.DetailedStats()
 
 	uptimeSec := int64(time.Since(s.startTime).Seconds())
-	uptime := (time.Duration(uptimeSec) * time.Second).String()
 
 	resp := models.StatsResponse{
 		Pool:      poolStats,
 		Scanner:   scannerStats,
 		Validator: validatorStats,
-		UptimeSec: uptimeSec,
-		Uptime:    uptime,
-		Version:   "1.0.0",
+		Uptime:    (time.Duration(uptimeSec) * time.Second).String(),
+		Version:   "1.1.0",
 	}
 
 	writeJSON(w, http.StatusOK, resp)
