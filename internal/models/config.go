@@ -139,10 +139,10 @@ func DefaultConfig() Config {
 		},
 		Validator: ValidatorConfig{
 			Workers:              20,
-			TimeoutMs:            5000,
+			TimeoutMs:            10000,
 			ProbeURL:             "http://httpbin.org/ip",
 			KeepaliveIntervalSec: 300,
-			MaxConsecutiveFails:  3,
+			MaxConsecutiveFails:  5,
 		},
 		Storage: StorageConfig{
 			Backend: "sqlite",

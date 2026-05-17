@@ -18,6 +18,10 @@ import (
 	"github.com/tatlilimon/proxier/internal/models"
 )
 
+// seenTTL is the duration a seen proxy address remains in the deduplication
+// map before it is eligible for re-entry into the validation pipeline.
+const seenTTL = 30 * time.Minute
+
 // Scanner fetches proxy lists from configured sources and forwards discovered
 // proxies to a downstream consumer via a channel.
 type Scanner struct {
@@ -50,7 +54,7 @@ func NewScanner(sources []models.SourceConfig, interval time.Duration) *Scanner 
 // discovered proxies and sends only the new batch to output. The loop exits
 // when ctx is cancelled.
 func (s *Scanner) Run(ctx context.Context, output chan<- *models.Proxy) {
-	seen := make(map[string]bool)
+	seen := make(map[string]time.Time)
 
 	// Initial fetch.
 	s.runOnce(ctx, output, seen)
@@ -71,7 +75,9 @@ func (s *Scanner) Run(ctx context.Context, output chan<- *models.Proxy) {
 // runOnce fetches every source, deduplicates the combined result, and sends
 // the new proxies downstream. Failures from individual sources are logged and
 // skipped.
-func (s *Scanner) runOnce(ctx context.Context, output chan<- *models.Proxy, seen map[string]bool) {
+func (s *Scanner) runOnce(ctx context.Context, output chan<- *models.Proxy, seen map[string]time.Time) {
+	s.cleanupSeen(seen)
+
 	start := time.Now()
 	now := start
 
@@ -243,18 +249,34 @@ func (s *Scanner) parseJSON(body []byte, src models.SourceConfig) []*models.Prox
 }
 
 // deduplicate filters proxies, keeping only those whose host:port key is not
-// already present in seen. New keys are recorded in seen for future runs.
-func (s *Scanner) deduplicate(proxies []*models.Proxy, seen map[string]bool) []*models.Proxy {
+// present in the recent-seen window. Entries older than seenTTL are re-allowed
+// and their timestamp is refreshed. Fresh entries are skipped.
+func (s *Scanner) deduplicate(proxies []*models.Proxy, seen map[string]time.Time) []*models.Proxy {
 	out := make([]*models.Proxy, 0, len(proxies))
+	now := time.Now()
 	for _, p := range proxies {
 		key := p.Address()
-		if seen[key] {
-			continue
+		if lastSeen, ok := seen[key]; ok {
+			if now.Sub(lastSeen) < seenTTL {
+				continue
+			}
+			log.Printf("scanner: re-allowing stale proxy %s (last seen %v ago)", key, now.Sub(lastSeen).Truncate(time.Second))
 		}
-		seen[key] = true
+		seen[key] = now
 		out = append(out, p)
 	}
 	return out
+}
+
+// cleanupSeen removes entries from the seen map that are older than seenTTL,
+// preventing unbounded memory growth.
+func (s *Scanner) cleanupSeen(seen map[string]time.Time) {
+	cutoff := time.Now().Add(-seenTTL)
+	for key, ts := range seen {
+		if ts.Before(cutoff) {
+			delete(seen, key)
+		}
+	}
 }
 
 // Stats returns the current scanner statistics.

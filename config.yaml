@@ -53,10 +53,10 @@ scanner:
 
 validator:
   workers: 20               # Concurrent validation goroutines
-  timeout_ms: 5000          # Per-proxy validation timeout
-  probe_url: "https://httpbin.org/ip"
+  timeout_ms: 10000          # Per-proxy validation timeout (10s for SOCKS)
+  probe_url: "http://httpbin.org/ip"
   keepalive_interval_sec: 300  # Re-check ALIVE proxies
-  max_consecutive_fails: 3     # ALIVE -> DEAD after N failures
+  max_consecutive_fails: 5     # ALIVE -> DEAD after N failures
 
 storage:
   backend: sqlite           # sqlite | json

@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,6 +110,28 @@ func (v *Validator) StartKeepalive(ctx context.Context) {
 					v.validateOne(ctx, p)
 				}
 			}
+
+			// Retry recently-dead proxies: up to 50 per cycle, dead within the last hour.
+			deadCount := 0
+			for _, p := range v.pool.All() {
+				if deadCount >= 50 {
+					break
+				}
+				if p.State != models.StateDead {
+					continue
+				}
+				if time.Since(p.LastChecked) > time.Hour {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					log.Printf("keepalive: retrying recently-dead proxy %s", p.Address())
+					v.validateOne(ctx, p)
+					deadCount++
+				}
+			}
 		}
 	}
 }
@@ -193,7 +217,7 @@ func (v *Validator) handleFailure(p *models.Proxy) {
 // createTransport builds an http.Transport that routes through the proxy.
 //
 // HTTP/HTTPS proxies use http.ProxyURL. SOCKS5 uses golang.org/x/net/proxy.
-// SOCKS4 is not supported for validation.
+// SOCKS4 uses a custom dialer that speaks the SOCKS4/SOCKS4a protocol directly.
 func (v *Validator) createTransport(p *models.Proxy) (*http.Transport, error) {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -219,7 +243,88 @@ func (v *Validator) createTransport(p *models.Proxy) (*http.Transport, error) {
 		transport.Proxy = nil
 
 	case models.ProtoSOCKS4:
-		return nil, fmt.Errorf("SOCKS4 validation is not supported")
+		probeURL, err := url.Parse(v.probeURL)
+		if err != nil {
+			return nil, fmt.Errorf("parsing probe URL: %w", err)
+		}
+		probeHost := probeURL.Hostname()
+		probePort := probeURL.Port()
+		if probePort == "" {
+			if probeURL.Scheme == "https" {
+				probePort = "443"
+			} else {
+				probePort = "80"
+			}
+		}
+		portNum, err := strconv.Atoi(probePort)
+		if err != nil {
+			return nil, fmt.Errorf("invalid probe port %q: %w", probePort, err)
+		}
+
+		proxyAddr := p.Address()
+
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			d := net.Dialer{Timeout: v.timeout}
+			conn, err := d.DialContext(ctx, "tcp", proxyAddr)
+			if err != nil {
+				return nil, fmt.Errorf("SOCKS4 connect to %s: %w", proxyAddr, err)
+			}
+
+			// Build SOCKS4/SOCKS4a CONNECT request.
+			// Format: [VN=4, CD=1, DSTPORT(2 BE), DSTIP(4), USERID\0, (SOCKS4a: HOSTNAME\0)]
+			var req []byte
+			dstIP := net.ParseIP(probeHost)
+			if dstIP != nil && dstIP.To4() != nil {
+				// Standard SOCKS4: destination is an IPv4 address.
+				req = make([]byte, 0, 9)
+				req = append(req, 4, 1) // VN=4, CD=1 (CONNECT)
+				req = append(req, byte(portNum>>8), byte(portNum&0xFF))
+				req = append(req, dstIP.To4()...)
+				req = append(req, 0) // empty user ID
+			} else {
+				// SOCKS4a: destination is a hostname; encode as 0.0.0.x.
+				req = make([]byte, 0, 9+len(probeHost)+1)
+				req = append(req, 4, 1) // VN=4, CD=1 (CONNECT)
+				req = append(req, byte(portNum>>8), byte(portNum&0xFF))
+				req = append(req, 0, 0, 0, 1) // 0.0.0.x (non-zero last byte signals SOCKS4a)
+				req = append(req, 0) // empty user ID
+				req = append(req, []byte(probeHost)...)
+				req = append(req, 0) // null terminator for hostname
+			}
+
+			// Set write/read deadline for the handshake.
+			if err := conn.SetDeadline(time.Now().Add(v.timeout)); err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			if _, err := conn.Write(req); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("SOCKS4 write request: %w", err)
+			}
+
+			// Read the 8-byte SOCKS4 response: [VN, CD, DSTPORT(2), DSTIP(4)]
+			resp := make([]byte, 8)
+			if _, err := io.ReadFull(conn, resp); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("SOCKS4 read response: %w", err)
+			}
+
+			// Clear the deadline after handshake so the HTTP exchange can proceed.
+			if err := conn.SetDeadline(time.Time{}); err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			// CD (reply code): 90 = granted, 91 = rejected, 92 = identd, 93 = identd mismatch
+			if resp[1] != 90 {
+				conn.Close()
+				return nil, fmt.Errorf("SOCKS4 request rejected: CD=%d", resp[1])
+			}
+
+			return conn, nil
+		}
+		transport.Proxy = nil
 
 	default:
 		return nil, fmt.Errorf("unsupported protocol %q", p.Protocol)
