@@ -53,6 +53,16 @@ func (p *Pool) Add(proxy *models.Proxy) {
 	defer p.mu.Unlock()
 
 	prev, exists := p.proxies[proxy.ID]
+	if exists && proxy.State == models.StateDiscovered && prev.State != models.StateDiscovered {
+		// Scanner re-discovered a proxy that already has validation state.
+		// Preserve accumulated history — don't let scanner overwrite it.
+		proxy.ConsecutiveFail = prev.ConsecutiveFail
+		proxy.ConsecutiveOK = prev.ConsecutiveOK
+		proxy.HealthScore = prev.HealthScore
+		proxy.State = prev.State
+		proxy.LastChecked = prev.LastChecked
+		proxy.FirstSeen = prev.FirstSeen // keep original discovery time
+	}
 	p.proxies[proxy.ID] = proxy
 
 	// Rebuild the alive slice only when the alive set changes.

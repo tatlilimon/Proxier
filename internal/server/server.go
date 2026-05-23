@@ -311,6 +311,11 @@ func validateProxy(ctx context.Context, p *models.Proxy, probeURL string) (alive
 			Timeout: 10 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
+		DisableKeepAlives:   true,
+		IdleConnTimeout:     90 * time.Second,
+		MaxConnsPerHost:     2,
+		MaxIdleConns:        0,
+		MaxIdleConnsPerHost: 0,
 	}
 
 	client := &http.Client{

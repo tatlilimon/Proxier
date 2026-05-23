@@ -44,6 +44,13 @@ func NewScanner(sources []models.SourceConfig, interval time.Duration) *Scanner 
 		sources: sources,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				DisableKeepAlives:   true,
+				IdleConnTimeout:     90 * time.Second,
+				MaxConnsPerHost:     4,
+				MaxIdleConns:        0,
+				MaxIdleConnsPerHost: 0,
+			},
 		},
 		interval: interval,
 	}

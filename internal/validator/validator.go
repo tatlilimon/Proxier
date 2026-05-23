@@ -111,6 +111,29 @@ func (v *Validator) StartKeepalive(ctx context.Context) {
 				}
 			}
 
+			// Retry stuck VALIDATING proxies: up to 100 per cycle, cooldown 60s.
+			validatingCount := 0
+			for _, p := range v.pool.All() {
+				if validatingCount >= 100 {
+					break
+				}
+				if p.State != models.StateValidating {
+					continue
+				}
+				// Avoid re-validating proxies that were just checked.
+				if time.Since(p.LastChecked) < 60*time.Second {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					log.Printf("keepalive: retrying stuck VALIDATING proxy %s (fails=%d)", p.Address(), p.ConsecutiveFail)
+					v.validateOne(ctx, p)
+					validatingCount++
+				}
+			}
+
 			// Retry recently-dead proxies: up to 50 per cycle, dead within the last hour.
 			deadCount := 0
 			for _, p := range v.pool.All() {
@@ -220,7 +243,12 @@ func (v *Validator) handleFailure(p *models.Proxy) {
 // SOCKS4 uses a custom dialer that speaks the SOCKS4/SOCKS4a protocol directly.
 func (v *Validator) createTransport(p *models.Proxy) (*http.Transport, error) {
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
+		DisableKeepAlives:  true,
+		IdleConnTimeout:    90 * time.Second,
+		MaxConnsPerHost:    2,
+		MaxIdleConns:       0,
+		MaxIdleConnsPerHost: 0,
 	}
 
 	switch p.Protocol {
