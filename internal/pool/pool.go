@@ -251,8 +251,6 @@ func (p *Pool) DetailedStats() models.PoolStats {
 			if proxy.LastChecked.After(cutoff) {
 				stats.DeadLastHour++
 			}
-		case models.StateDiscovered:
-			stats.Discovered++
 		}
 	}
 

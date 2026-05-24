@@ -4,7 +4,7 @@ server:
   port: 8080
 
 scanner:
-  interval_sec: 600          # How often the scanner runs
+  interval_sec: 600          # How often the scanner runs (10 min)
   sources:
     # Direct APIs (cleanest output)
     - url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=getproxies&protocol=http&limit=2000"
@@ -52,15 +52,15 @@ scanner:
       protocol: socks5
 
 validator:
-  workers: 20               # Concurrent validation goroutines
-  timeout_ms: 10000          # Per-proxy validation timeout (10s for SOCKS)
+  workers: 100                # Concurrent validation goroutines (100 = fast throughput)
+  timeout_ms: 3000            # Per-proxy validation timeout (3s — dead proxies fail fast)
   probe_url: "http://httpbin.org/ip"
-  keepalive_interval_sec: 300  # Re-check ALIVE proxies
-  max_consecutive_fails: 5     # ALIVE -> DEAD after N failures
+  keepalive_interval_sec: 120 # Re-check ALIVE proxies every 2 min
+  max_consecutive_fails: 3    # ALIVE → DEAD after 3 consecutive failures
 
 storage:
-  backend: sqlite           # sqlite | json
-  path: "./proxies.db"      # File path for sqlite/json
+  backend: sqlite             # sqlite | json
+  path: "./proxies.db"        # File path for sqlite/json
 
 # Built-in proxy sources (these are always loaded)
 # Additional sources can be added via PROXY_SOURCES env var (comma-separated URLs)

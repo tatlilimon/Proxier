@@ -84,7 +84,6 @@ type PoolStats struct {
 	Alive          int            `json:"alive"`
 	Validating     int            `json:"validating"`
 	Dead           int            `json:"dead"`
-	Discovered     int            `json:"discovered"`
 	DeadLastHour   int            `json:"dead_last_hour"`
 	AvgHealthScore float64        `json:"avg_health_score"`
 	Protocols      map[string]int `json:"protocols"`
