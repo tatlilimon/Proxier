@@ -166,7 +166,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Scanner:   scannerStats,
 		Validator: validatorStats,
 		Uptime:    (time.Duration(uptimeSec) * time.Second).String(),
-		Version:   "1.2.0",
+		Version:   "1.3.0",
 	}
 
 	writeJSON(w, http.StatusOK, resp)

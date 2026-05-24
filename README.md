@@ -51,10 +51,10 @@ All settings live in `config.yaml`. Override any value with environment variable
 |---|---|---|
 | `PORT` | `8080` | HTTP server port |
 | `SCANNER_INTERVAL_SEC` | `600` | Scanner interval in seconds |
-| `VALIDATOR_WORKERS` | `20` | Concurrent validation goroutines |
-| `VALIDATOR_TIMEOUT_MS` | `5000` | Per-proxy validation timeout |
+| `VALIDATOR_WORKERS` | `100` | Concurrent validation goroutines |
+| `VALIDATOR_TIMEOUT_MS` | `3000` | Per-proxy validation timeout |
 | `VALIDATOR_PROBE_URL` | `http://httpbin.org/ip` | URL used to test each proxy |
-| `KEEPALIVE_INTERVAL_SEC` | `300` | ALIVE proxy re-check interval |
+| `KEEPALIVE_INTERVAL_SEC` | `120` | ALIVE proxy re-check interval |
 | `MAX_CONSECUTIVE_FAILS` | `3` | Failures before marking DEAD |
 | `STORAGE_BACKEND` | `sqlite` | `sqlite` or `json` |
 | `STORAGE_PATH` | `./proxies.db` | Database file path |
@@ -137,7 +137,7 @@ Runtime statistics about the service.
 {
   "pool": {
     "alive": 142, "validating": 38, "dead_last_hour": 23,
-    "total": 1003, "dead": 417, "discovered": 0,
+    "total": 1003, "dead": 417,
     "avg_health_score": 0.64,
     "protocols": { "http": 98, "socks5": 44 }
   },
@@ -152,7 +152,7 @@ Runtime statistics about the service.
     "success_rate_pct": 8.9, "avg_latency_ms": 388
   },
   "uptime": "2h3m15s",
-  "version": "1.2.0"
+  "version": "1.3.0"
 }
 ```
 
@@ -205,7 +205,7 @@ DISCOVERED --> VALIDATING --> ALIVE
                           --> DEAD (retryable)
 ```
 
-- **DISCOVERED** — Fetched from a source, not yet tested
+- **DISCOVERED** — Transport-only state; fetched from a source, sent to validator via channel, immediately promoted to VALIDATING before entering the pool. Never visible in `/stats`.
 - **VALIDATING** — Currently being tested
 - **ALIVE** — Confirmed working, available to consumers
 - **DEAD** — Failed validation; removed from rotation, may be re-tested on the next scanner cycle
