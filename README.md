@@ -1,8 +1,23 @@
 # Proxier
 
-A lightweight Go HTTP service that continuously scans, validates, and serves working free proxies. Designed for IP rotation, scraping pipelines, or any use case that requires fresh, anonymous proxy access.
+Lightweight Go proxy pool — scan, validate, serve. Built by [tatlilimon](https://github.com/tatlilimon).
+
+Proxier continuously scrapes free proxy lists from 14 sources, validates each proxy in parallel, and exposes a clean REST API for IP rotation. Use it for scraping pipelines, privacy tools, or any workflow that needs fresh anonymous proxies.
+
+```bash
+curl http://localhost:8080/proxy?protocol=socks5
+# {"proxy":"socks5://1.2.3.4:1080","latency_ms":312,"health_score":0.87}
+```
 
 ## Quick Start
+
+### Docker (recommended)
+
+```bash
+docker compose up -d
+curl http://localhost:8080/health      # {"status":"ok"}
+curl http://localhost:8080/stats | jq  # pool stats
+```
 
 ### Native
 
@@ -11,61 +26,38 @@ go build -o proxier ./cmd/proxier/
 ./proxier
 ```
 
-The service starts on port 8080 with 14 pre-configured proxy sources. On first run the pool is empty; wait for the first scanner cycle to populate it.
+### Customize
 
-### Docker
-
-```bash
-docker compose up -d
-```
-
-Or build and run manually:
+Override any config value via environment variables:
 
 ```bash
-docker build -t proxier .
-docker run -p 8080:8080 proxier
-```
-
-To customize configuration, override the baked-in defaults with environment variables:
-
-```bash
-docker run -p 9090:9090 -e PORT=9090 -e SCANNER_INTERVAL_SEC=300 proxier
-```
-
-If you need a fully custom config, build your own image with a modified `config.yaml` or mount it into a custom path and set `CONFIG_PATH`.
-
-### Verify
-
-```bash
-curl http://localhost:8080/health
-# {"status":"ok"}
-
-curl http://localhost:8080/stats | jq
+docker run -p 9090:9090 \
+  -e PORT=9090 \
+  -e VALIDATOR_WORKERS=50 \
+  -e SCANNER_INTERVAL_SEC=300 \
+  proxier
 ```
 
 ## Configuration
 
-All settings live in `config.yaml`. Override any value with environment variables:
-
-| Env Var | Default | Description |
+| Variable | Default | Description |
 |---|---|---|
 | `PORT` | `8080` | HTTP server port |
-| `SCANNER_INTERVAL_SEC` | `600` | Scanner interval in seconds |
-| `VALIDATOR_WORKERS` | `100` | Concurrent validation goroutines |
-| `VALIDATOR_TIMEOUT_MS` | `3000` | Per-proxy validation timeout |
-| `VALIDATOR_PROBE_URL` | `http://httpbin.org/ip` | URL used to test each proxy |
+| `SCANNER_INTERVAL_SEC` | `600` | Source fetch interval |
+| `VALIDATOR_WORKERS` | `100` | Concurrent validation workers |
+| `VALIDATOR_TIMEOUT_MS` | `3000` | Per-proxy probe timeout |
+| `VALIDATOR_PROBE_URL` | `http://httpbin.org/ip` | Endpoint used to test proxies |
 | `KEEPALIVE_INTERVAL_SEC` | `120` | ALIVE proxy re-check interval |
 | `MAX_CONSECUTIVE_FAILS` | `3` | Failures before marking DEAD |
 | `STORAGE_BACKEND` | `sqlite` | `sqlite` or `json` |
-| `STORAGE_PATH` | `./proxies.db` | Database file path |
+| `STORAGE_PATH` | `./proxies.db` | Persistence file path |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `PROXY_SOURCES` | — | Comma-separated URLs appended to scanner sources |
+| `PROXY_SOURCES` | — | Comma-separated URLs to append |
 
-### Adding Proxy Sources
-
-Add entries under `scanner.sources` in `config.yaml`:
+### Adding Sources
 
 ```yaml
+# config.yaml
 scanner:
   sources:
     - url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=getproxies&protocol=http&limit=2000"
@@ -76,25 +68,21 @@ scanner:
       protocol: socks5
 ```
 
-Supported formats: `txt` (ip:port per line) and `json`. Protocols: `http`, `https`, `socks4`, `socks5`, `mixed`.
+Supported formats are `txt` (one `ip:port` per line) and `json`. Supported protocols: `http`, `https`, `socks4`, `socks5`, `mixed`.
 
-## API Reference
+## API
 
 Base URL: `http://localhost:8080`
 
-### GET /proxy
+### `GET /proxy`
 
-Returns a single working proxy, selected by weighted random (favors high health score).
-
-**Query Parameters**
+Returns one working proxy — weighted random selection favoring higher health scores.
 
 | Param | Type | Default | Description |
 |---|---|---|---|
 | `format` | string | `url` | `url` or `hostport` |
 | `protocol` | string | `any` | `http`, `https`, `socks4`, `socks5` |
-| `max_latency_ms` | int | none | Only proxies below this latency |
-
-**Response 200**
+| `max_latency_ms` | int | — | Max acceptable latency |
 
 ```json
 {
@@ -107,47 +95,45 @@ Returns a single working proxy, selected by weighted random (favors high health 
 }
 ```
 
-**Response 503**
+No match returns `503` with `{"error":"no proxy available"}`.
 
-```json
-{ "error": "no proxy available" }
-```
+### `GET /proxies`
 
-### GET /proxies
-
-Returns a list of working proxies.
+Returns multiple proxies. Limits are capped at 100.
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `limit` | int | `10` | Max proxies (capped at 100) |
-| `format` | string | `url` | Same as `/proxy` |
-| `protocol` | string | `any` | Same as `/proxy` |
-| `max_latency_ms` | int | none | Same as `/proxy` |
+| `limit` | int | `10` | Max results |
 | `sort` | string | `random` | `random`, `latency`, `health_score` |
 
-### GET /rotate
+Supports the same `format`, `protocol`, and `max_latency_ms` filters as `/proxy`.
 
-Returns the next proxy using round-robin over the ALIVE pool. Same query parameters as `/proxy`.
+### `GET /rotate`
 
-### GET /stats
+Round-robin over the ALIVE pool. Same query params as `/proxy`.
 
-Runtime statistics about the service.
+### `GET /stats`
+
+Live runtime statistics.
+
+<details>
+<summary>Example response</summary>
 
 ```json
 {
   "pool": {
-    "alive": 142, "validating": 38, "dead_last_hour": 23,
-    "total": 1003, "dead": 417,
+    "total": 1003, "alive": 142, "validating": 38,
+    "dead": 417, "dead_last_hour": 23,
     "avg_health_score": 0.64,
     "protocols": { "http": 98, "socks5": 44 }
   },
   "scanner": {
-    "last_run": "...", "next_run": "...", "sources_count": 14,
-    "last_fetch_count": 43200, "total_discovered": 21500,
-    "last_duration_ms": 3800
+    "sources_count": 14, "last_fetch_count": 43200,
+    "total_discovered": 21500, "last_duration_ms": 3800,
+    "last_run": "2026-05-24T10:00:00Z", "next_run": "2026-05-24T10:10:00Z"
   },
   "validator": {
-    "workers": 20, "total_checks": 1580,
+    "workers": 100, "total_checks": 1580,
     "success_count": 142, "failure_count": 1438,
     "success_rate_pct": 8.9, "avg_latency_ms": 388
   },
@@ -156,22 +142,24 @@ Runtime statistics about the service.
 }
 ```
 
-### GET /health
+</details>
 
-Liveness probe. Returns 200 even if the pool is empty.
+### `GET /health`
+
+Liveness probe — returns 200 even with an empty pool.
 
 ```json
 { "status": "ok" }
 ```
 
-### POST /validate
+### `POST /validate`
 
-Manually trigger validation of a specific proxy.
+Test a specific proxy on demand.
 
 ```bash
 curl -X POST http://localhost:8080/validate \
   -H "Content-Type: application/json" \
-  -d '{"proxy": "http://123.45.67.89:8080"}'
+  -d '{"proxy":"http://123.45.67.89:8080"}'
 ```
 
 ```json
@@ -181,82 +169,62 @@ curl -X POST http://localhost:8080/validate \
 ## Architecture
 
 ```
-Scanner (interval) --> Candidate Queue (channel) --> Validator (workers)
-                                                         |
-                                                    Proxy Pool (in-memory)
-                                                         |
-                                                    Storage (SQLite)
-                                                         |
-                                                    HTTP API Server
+  Sources (14)                Validator Workers (100)
+      |                              |
+      v                              v
+  Scanner ---> Channel (2000) ---> Pool (in-memory)
+  (interval)      |                    |
+                  |                    v
+                  |            Storage (SQLite)
+                  |                    |
+                  v                    v
+           Keepalive Loop      REST API (:8080)
 ```
 
-**Scanner** fetches proxy lists from configured sources, deduplicates, and pushes new candidates into a channel. It never validates.
+- **Scanner** — Fetches proxy lists, deduplicates, pushes to channel. Never validates.
+- **Validator** — Routes HTTP requests through each proxy to the probe URL. Promotes working proxies to ALIVE with a health score. Demotes failures to DEAD after `MAX_CONSECUTIVE_FAILS`.
+- **Keepalive** — Periodically re-checks ALIVE and stuck VALIDATING proxies. Retries recently DEAD proxies.
+- **Pool** — Thread-safe in-memory store with weighted random selection, round-robin, and protocol/latency filtering.
+- **Storage** — SQLite persistence (pure Go, no CGO). Swappable via adapter interface.
 
-**Validator** runs a configurable pool of workers. Each worker picks a proxy from the channel, routes an HTTP request through it to the probe URL, and measures latency. Successful proxies are promoted to ALIVE with a health score. Failed proxies are demoted after reaching the consecutive failure threshold. A keepalive loop periodically re-checks all ALIVE proxies.
-
-**Proxy Pool** is a thread-safe in-memory store. It supports weighted random selection by health score, round-robin iteration, and protocol/latency filtering. Writes are lock-protected; reads for the HTTP API are served directly.
-
-**Storage** persists proxy state across restarts using SQLite (pure Go, no CGO). An adapter interface allows swapping to other backends.
-
-## Proxy States
+## Proxy Lifecycle
 
 ```
-DISCOVERED --> VALIDATING --> ALIVE
-                          --> DEAD (retryable)
+  DISCOVERED ---> VALIDATING ---> ALIVE ----
+       (channel)     |                     | (keepalive re-check)
+                     v                     v
+                   DEAD <--------- VALIDATING
+                (retryable)
 ```
 
-- **DISCOVERED** — Transport-only state; fetched from a source, sent to validator via channel, immediately promoted to VALIDATING before entering the pool. Never visible in `/stats`.
-- **VALIDATING** — Currently being tested
-- **ALIVE** — Confirmed working, available to consumers
-- **DEAD** — Failed validation; removed from rotation, may be re-tested on the next scanner cycle
+| State | Meaning |
+|---|---|
+| `DISCOVERED` | Transport-only — scanner to channel to validator. Never visible in `/stats`. |
+| `VALIDATING` | Being tested against the probe URL. |
+| `ALIVE` | Confirmed working. Available via `/proxy`, `/proxies`, `/rotate`. |
+| `DEAD` | Failed `MAX_CONSECUTIVE_FAILS` times. Removed from rotation. May be retried later. |
 
-## Health Score
+### Health Score
 
-Each ALIVE proxy carries a `health_score` (0.0--1.0) calculated from:
+Each ALIVE proxy carries a score (`0.0`–`1.0`) used for weighted selection:
 
-- Response latency (lower is better, 0.4 weight)
-- Consecutive successful validations (0.6 weight)
+- Latency — 1.0 at <=100ms, linear ramp to 0 at >=5000ms (x0.4 weight)
+- Success streak — `min(consecutive_ok / 10, 1.0)` (x0.6 weight)
 
-Higher scores are favored during weighted random selection.
+## Source List
 
-## Proxy Sources
+The default config ships with 14 sources:
 
-The default `config.yaml` ships with 14 sources across these categories:
+| Category | Sources |
+|---|---|
+| Direct APIs | ProxyScrape v4, OpenProxyList.xyz |
+| GitHub Lists | TheSpeedX/PROXY-List, monosans/proxy-list, jetkai/proxy-list, sunny9577/proxy-scraper, hookzof/socks5_list |
 
-**Direct APIs** (clean machine-parseable output):
-- ProxyScrape v4
-- OpenProxyList.xyz
-
-**GitHub Raw Lists** (auto-updated via CI):
-- TheSpeedX/PROXY-List
-- monosans/proxy-list
-- jetkai/proxy-list
-- sunny9577/proxy-scraper
-- hookzof/socks5_list
-
-All sources are fetched in parallel. Failed sources are logged and skipped; the service continues with whatever is available.
-
-## Project Structure
-
-```
-proxier/
-  cmd/proxier/main.go          Application entry point
-  internal/
-    config/                    YAML + env var config loading
-    models/                    Shared types (Proxy, Config, API responses)
-    pool/                      Thread-safe proxy pool
-    scanner/                   Source fetching and parsing
-    server/                    HTTP API (6 endpoints)
-    storage/                   Persistence layer (SQLite + adapter interface)
-    validator/                 Worker pool for proxy health checking
-  config.yaml                  Default configuration
-  Dockerfile                   Multi-stage Docker build
-  docker-compose.yml           Docker Compose orchestration
-```
+All sources are fetched in parallel. Failed sources are skipped — the service continues with whatever is available.
 
 ## Non-Goals
 
-- Authentication / API keys — deploy behind a reverse proxy if needed
+- Authentication / API keys (deploy behind a reverse proxy)
 - Proxy chaining
 - Paid proxy support
 - Browser fingerprinting
