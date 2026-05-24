@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,11 +15,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tatlilimon/proxier/internal/metrics"
 	"github.com/tatlilimon/proxier/internal/models"
 	"github.com/tatlilimon/proxier/internal/pool"
 	"github.com/tatlilimon/proxier/internal/scanner"
 	"github.com/tatlilimon/proxier/internal/validator"
 )
+
+// Version is set at build time via -ldflags. Defaults to "dev" for local
+// builds and is overridden to the git tag in Docker builds.
+var Version = "dev"
 
 type Server struct {
 	httpServer *http.Server
@@ -52,6 +57,7 @@ func NewServer(
 	mux.HandleFunc("GET /stats", srv.handleStats)
 	mux.HandleFunc("GET /health", srv.handleHealth)
 	mux.HandleFunc("POST /validate", srv.handleValidate)
+	mux.HandleFunc("GET /metrics", metrics.New(p, s, v, srv.startTime).Handler())
 
 	srv.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
@@ -62,7 +68,7 @@ func NewServer(
 }
 
 func (s *Server) Start() error {
-	log.Printf("server starting on %s", s.httpServer.Addr)
+	slog.Info("server starting", "addr", s.httpServer.Addr)
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server listen: %w", err)
 	}
@@ -70,7 +76,7 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	log.Println("server shutting down...")
+	slog.Info("server shutting down")
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -83,7 +89,7 @@ func (s *Server) WaitForShutdown() {
 	defer cancel()
 
 	if err := s.Shutdown(ctx); err != nil {
-		log.Printf("shutdown error: %v", err)
+		slog.Error("shutdown error", "error", err)
 	}
 }
 
@@ -92,7 +98,12 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(wrapped, r)
-		log.Printf("%s %s %d %s", r.Method, r.URL.Path, wrapped.statusCode, time.Since(start))
+		slog.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", wrapped.statusCode,
+			"duration", time.Since(start).String(),
+		)
 	})
 }
 
@@ -166,7 +177,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Scanner:   scannerStats,
 		Validator: validatorStats,
 		Uptime:    (time.Duration(uptimeSec) * time.Second).String(),
-		Version:   "1.3.0",
+		Version:   Version,
 	}
 
 	writeJSON(w, http.StatusOK, resp)

@@ -4,8 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tatlilimon/proxier/internal/models"
+	"github.com/tatlilimon/proxier/internal/socks4"
 	"golang.org/x/net/proxy"
 )
 
@@ -128,7 +128,7 @@ func (v *Validator) StartKeepalive(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				default:
-					log.Printf("keepalive: retrying stuck VALIDATING proxy %s (fails=%d)", p.Address(), p.ConsecutiveFail)
+					slog.Info("keepalive retrying stuck validating proxy", "address", p.Address(), "fails", p.ConsecutiveFail)
 					v.validateOne(ctx, p)
 					validatingCount++
 				}
@@ -150,7 +150,7 @@ func (v *Validator) StartKeepalive(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				default:
-					log.Printf("keepalive: retrying recently-dead proxy %s", p.Address())
+					slog.Info("keepalive retrying recently-dead proxy", "address", p.Address())
 					v.validateOne(ctx, p)
 					deadCount++
 				}
@@ -166,7 +166,7 @@ func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {
 
 	transport, err := v.createTransport(p)
 	if err != nil {
-		log.Printf("validator: transport for %s: %v", p.Address(), err)
+		slog.Warn("validator transport error", "address", p.Address(), "error", err)
 		v.handleFailure(p)
 		return
 	}
@@ -177,7 +177,7 @@ func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, v.probeURL, nil)
 	if err != nil {
-		log.Printf("validator: request for %s: %v", p.Address(), err)
+		slog.Warn("validator request error", "address", p.Address(), "error", err)
 		v.handleFailure(p)
 		return
 	}
@@ -193,14 +193,14 @@ func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {
 	latency := time.Since(start)
 
 	if err != nil {
-		log.Printf("validator: %s unreachable (%v)", p.Address(), err)
+		slog.Debug("validator proxy unreachable", "address", p.Address(), "error", err)
 		v.handleFailure(p)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("validator: %s returned HTTP %d", p.Address(), resp.StatusCode)
+		slog.Debug("validator bad status", "address", p.Address(), "status", resp.StatusCode)
 		v.handleFailure(p)
 		return
 	}
@@ -231,7 +231,7 @@ func (v *Validator) handleFailure(p *models.Proxy) {
 		p.State = models.StateDead
 		p.ConsecutiveOK = 0
 		p.HealthScore = 0
-		log.Printf("validator: %s marked DEAD (%d consecutive failures)", p.Address(), p.ConsecutiveFail)
+		slog.Warn("validator proxy marked dead", "address", p.Address(), "consecutive_fails", p.ConsecutiveFail)
 	}
 
 	v.pool.Add(p)
@@ -292,65 +292,7 @@ func (v *Validator) createTransport(p *models.Proxy) (*http.Transport, error) {
 		proxyAddr := p.Address()
 
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			d := net.Dialer{Timeout: v.timeout}
-			conn, err := d.DialContext(ctx, "tcp", proxyAddr)
-			if err != nil {
-				return nil, fmt.Errorf("SOCKS4 connect to %s: %w", proxyAddr, err)
-			}
-
-			// Build SOCKS4/SOCKS4a CONNECT request.
-			// Format: [VN=4, CD=1, DSTPORT(2 BE), DSTIP(4), USERID\0, (SOCKS4a: HOSTNAME\0)]
-			var req []byte
-			dstIP := net.ParseIP(probeHost)
-			if dstIP != nil && dstIP.To4() != nil {
-				// Standard SOCKS4: destination is an IPv4 address.
-				req = make([]byte, 0, 9)
-				req = append(req, 4, 1) // VN=4, CD=1 (CONNECT)
-				req = append(req, byte(portNum>>8), byte(portNum&0xFF))
-				req = append(req, dstIP.To4()...)
-				req = append(req, 0) // empty user ID
-			} else {
-				// SOCKS4a: destination is a hostname; encode as 0.0.0.x.
-				req = make([]byte, 0, 9+len(probeHost)+1)
-				req = append(req, 4, 1) // VN=4, CD=1 (CONNECT)
-				req = append(req, byte(portNum>>8), byte(portNum&0xFF))
-				req = append(req, 0, 0, 0, 1) // 0.0.0.x (non-zero last byte signals SOCKS4a)
-				req = append(req, 0) // empty user ID
-				req = append(req, []byte(probeHost)...)
-				req = append(req, 0) // null terminator for hostname
-			}
-
-			// Set write/read deadline for the handshake.
-			if err := conn.SetDeadline(time.Now().Add(v.timeout)); err != nil {
-				conn.Close()
-				return nil, err
-			}
-
-			if _, err := conn.Write(req); err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("SOCKS4 write request: %w", err)
-			}
-
-			// Read the 8-byte SOCKS4 response: [VN, CD, DSTPORT(2), DSTIP(4)]
-			resp := make([]byte, 8)
-			if _, err := io.ReadFull(conn, resp); err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("SOCKS4 read response: %w", err)
-			}
-
-			// Clear the deadline after handshake so the HTTP exchange can proceed.
-			if err := conn.SetDeadline(time.Time{}); err != nil {
-				conn.Close()
-				return nil, err
-			}
-
-			// CD (reply code): 90 = granted, 91 = rejected, 92 = identd, 93 = identd mismatch
-			if resp[1] != 90 {
-				conn.Close()
-				return nil, fmt.Errorf("SOCKS4 request rejected: CD=%d", resp[1])
-			}
-
-			return conn, nil
+			return socks4.Dial(ctx, probeHost, portNum, proxyAddr, v.timeout)
 		}
 		transport.Proxy = nil
 

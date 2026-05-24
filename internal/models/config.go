@@ -97,6 +97,7 @@ type ScannerStats struct {
 	LastFetchCount  int       `json:"last_fetch_count"`
 	TotalDiscovered int64     `json:"total_discovered"`
 	LastDurationMs  int64     `json:"last_duration_ms"`
+	Dropped         int64     `json:"dropped"`
 }
 
 // ValidatorStats holds validator statistics.

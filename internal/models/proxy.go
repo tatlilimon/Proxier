@@ -51,6 +51,10 @@ type Proxy struct {
 	FirstSeen       time.Time `json:"first_seen"`
 	LastChecked     time.Time `json:"last_checked"`
 	Source          string    `json:"source"`
+
+	// Dirty is true when the proxy has been modified since the last persistence
+	// flush. It is not persisted to storage — runtime-only.
+	Dirty bool `json:"-"`
 }
 
 // ProxyID generates a deterministic unique ID for a host:port combination.

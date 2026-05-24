@@ -130,6 +130,7 @@ Live runtime statistics.
   "scanner": {
     "sources_count": 14, "last_fetch_count": 43200,
     "total_discovered": 21500, "last_duration_ms": 3800,
+    "dropped": 0,
     "last_run": "2026-05-24T10:00:00Z", "next_run": "2026-05-24T10:10:00Z"
   },
   "validator": {
@@ -138,7 +139,7 @@ Live runtime statistics.
     "success_rate_pct": 8.9, "avg_latency_ms": 388
   },
   "uptime": "2h3m15s",
-  "version": "1.3.0"
+  "version": "1.4.0"
 }
 ```
 
@@ -166,6 +167,62 @@ curl -X POST http://localhost:8080/validate \
 { "proxy": "http://123.45.67.89:8080", "alive": true, "latency_ms": 290 }
 ```
 
+### `GET /metrics`
+
+Prometheus exposition format. All pool, scanner, and validator counters as Gauges.
+
+```
+# HELP proxier_pool_alive Alive proxies available for rotation
+# TYPE proxier_pool_alive gauge
+proxier_pool_alive 287
+# HELP proxier_validator_success_rate_pct Validation success rate
+# TYPE proxier_validator_success_rate_pct gauge
+proxier_validator_success_rate_pct 1.97
+# HELP proxier_uptime_seconds Process uptime in seconds
+# TYPE proxier_uptime_seconds gauge
+proxier_uptime_seconds 14378
+```
+
+| Metric | Description |
+|---|---|
+| `proxier_pool_total` | Total proxies tracked |
+| `proxier_pool_alive` | Alive proxies available for rotation |
+| `proxier_pool_validating` | Proxies currently being validated |
+| `proxier_pool_dead` | Dead proxies |
+| `proxier_pool_dead_last_hour` | Died within the last hour |
+| `proxier_pool_avg_health_score` | Average health score of alive proxies |
+| `proxier_pool_protocol_count` | Alive proxies per protocol (labeled: http/socks4/socks5) |
+| `proxier_validator_workers` | Concurrent validation workers |
+| `proxier_validator_checks_total` | Total validation attempts |
+| `proxier_validator_success_total` | Successful validations |
+| `proxier_validator_failure_total` | Failed validations |
+| `proxier_validator_success_rate_pct` | Validation success rate |
+| `proxier_validator_avg_latency_ms` | Average validation latency |
+| `proxier_scanner_sources` | Number of active proxy sources |
+| `proxier_scanner_last_fetch_count` | Proxies fetched in last cycle |
+| `proxier_scanner_discovered_total` | Total unique proxies discovered |
+| `proxier_scanner_last_duration_ms` | Last scan cycle duration (ms) |
+| `proxier_scanner_dropped_total` | Proxies dropped due to full channel |
+| `proxier_uptime_seconds` | Process uptime in seconds |
+
+## Monitoring (Prometheus + Grafana)
+
+`docker compose up -d` starts three services:
+
+| Service | Port | Description |
+|---|---|---|
+| **proxier** | `:8080` | Proxy pool API + `/metrics` endpoint |
+| **prometheus** | `:9090` | Scrapes `/metrics` every 15s, 7-day retention |
+| **grafana** | `:3000` | Pre-configured dashboard with 13 panels |
+
+```
+http://localhost:3000   →  Grafana (admin / proxier)
+http://localhost:9090   →  Prometheus UI
+http://localhost:8080   →  Proxier API
+```
+
+The Grafana dashboard auto-loads from `grafana/dashboards/proxier.json` and covers pool overview, protocol distribution, validator throughput, success rate, latency, and scanner activity. All panels refresh every 10 seconds.
+
 ## Architecture
 
 ```
@@ -174,18 +231,25 @@ curl -X POST http://localhost:8080/validate \
       v                              v
   Scanner ---> Channel (2000) ---> Pool (in-memory)
   (interval)      |                    |
-                  |                    v
-                  |            Storage (SQLite)
-                  |                    |
-                  v                    v
-           Keepalive Loop      REST API (:8080)
+                  | (non-blocking)     v
+                  v              Storage (SQLite)
+            Dropped counter     (dirty-only persist)
+                                      |
+                                      v
+                              Keepalive Loop
+                                      |
+                                      v
+                              REST API (:8080)
+                              /proxy /proxies /rotate
+                              /stats /health /validate
+                              /metrics (Prometheus)
 ```
 
-- **Scanner** — Fetches proxy lists, deduplicates, pushes to channel. Never validates.
-- **Validator** — Routes HTTP requests through each proxy to the probe URL. Promotes working proxies to ALIVE with a health score. Demotes failures to DEAD after `MAX_CONSECUTIVE_FAILS`.
+- **Scanner** — Fetches proxy lists, deduplicates, pushes to channel. Non-blocking send — drops when channel is full rather than stalling. Never validates.
+- **Validator** — Routes HTTP/SOCKS4/SOCKS5 requests through each proxy to the probe URL. Promotes working proxies to ALIVE with a health score. Demotes failures to DEAD after `MAX_CONSECUTIVE_FAILS`.
 - **Keepalive** — Periodically re-checks ALIVE and stuck VALIDATING proxies. Retries recently DEAD proxies.
-- **Pool** — Thread-safe in-memory store with weighted random selection, round-robin, and protocol/latency filtering.
-- **Storage** — SQLite persistence (pure Go, no CGO). Swappable via adapter interface.
+- **Pool** — Thread-safe in-memory store with atomic counters, weighted random selection, round-robin, and protocol/latency filtering. `DetailedStats()` reads atomics — no full-map lock.
+- **Storage** — SQLite persistence (pure Go, modernc.org/sqlite, no CGO). Saves only dirty proxies on each 30s flush cycle.
 
 ## Proxy Lifecycle
 
@@ -228,4 +292,3 @@ All sources are fetched in parallel. Failed sources are skipped — the service 
 - Proxy chaining
 - Paid proxy support
 - Browser fingerprinting
-- GUI or dashboard

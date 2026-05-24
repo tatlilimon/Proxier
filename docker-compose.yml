@@ -1,6 +1,9 @@
 services:
   proxier:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: "1.4.0"
     container_name: proxier
     ports:
       - "8080:8080"
@@ -18,5 +21,34 @@ services:
       timeout: 5s
       retries: 3
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: proxier-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: proxier-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=proxier
+    volumes:
+      - ./grafana/datasources/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro,Z
+      - ./grafana/dashboards/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro,Z
+      - ./grafana/dashboards/proxier.json:/etc/grafana/provisioning/dashboards/proxier.json:ro,Z
+    restart: unless-stopped
+
 volumes:
   proxier_data:
+  prometheus_data:

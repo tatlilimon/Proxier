@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tatlilimon/proxier/internal/models"
@@ -35,6 +36,9 @@ type Scanner struct {
 	lastFetchCount  int
 	lastDurationMs  int64
 	totalDiscovered int64
+
+	// dropped counts proxies discarded because the output channel was full.
+	dropped atomic.Int64
 }
 
 // NewScanner creates a new Scanner with the given proxy sources and scan
@@ -98,7 +102,7 @@ func (s *Scanner) runOnce(ctx context.Context, output chan<- *models.Proxy, seen
 	for _, src := range s.sources {
 		proxies, err := s.fetchSource(ctx, src)
 		if err != nil {
-			log.Printf("scanner: skipping source %s: %v", src.URL, err)
+			slog.Warn("scanner skipping source", "url", src.URL, "error", err)
 			continue
 		}
 		all = append(all, proxies...)
@@ -117,6 +121,8 @@ func (s *Scanner) runOnce(ctx context.Context, output chan<- *models.Proxy, seen
 		case <-ctx.Done():
 			return
 		case output <- p:
+		default:
+			s.dropped.Add(1)
 		}
 	}
 }
@@ -225,7 +231,7 @@ type jsonProxy struct {
 func (s *Scanner) parseJSON(body []byte, src models.SourceConfig) []*models.Proxy {
 	var entries []jsonProxy
 	if err := json.Unmarshal(body, &entries); err != nil {
-		log.Printf("scanner: bad JSON from %s: %v", src.URL, err)
+		slog.Warn("scanner bad JSON", "url", src.URL, "error", err)
 		return nil
 	}
 
@@ -267,7 +273,7 @@ func (s *Scanner) deduplicate(proxies []*models.Proxy, seen map[string]time.Time
 			if now.Sub(lastSeen) < seenTTL {
 				continue
 			}
-			log.Printf("scanner: re-allowing stale proxy %s (last seen %v ago)", key, now.Sub(lastSeen).Truncate(time.Second))
+			slog.Info("scanner re-allowing stale proxy", "address", key, "age", now.Sub(lastSeen).Truncate(time.Second).String())
 		}
 		seen[key] = now
 		out = append(out, p)
@@ -304,5 +310,6 @@ func (s *Scanner) DetailedStats() models.ScannerStats {
 		LastFetchCount:  s.lastFetchCount,
 		TotalDiscovered: s.totalDiscovered,
 		LastDurationMs:  s.lastDurationMs,
+		Dropped:         s.dropped.Load(),
 	}
 }
