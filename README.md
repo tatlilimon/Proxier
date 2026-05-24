@@ -221,8 +221,6 @@ http://localhost:9090   →  Prometheus UI
 http://localhost:8080   →  Proxier API
 ```
 
-![Grafana Dashboard](docs/grafana-dashboard.png)
-
 The Grafana dashboard auto-loads from `grafana/dashboards/proxier.json` and covers pool overview, protocol distribution, validator throughput, success rate, latency, and scanner activity. All panels refresh every 10 seconds.
 
 ## Architecture
