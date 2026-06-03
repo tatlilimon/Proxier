@@ -63,9 +63,33 @@ func main() {
 	proxyCh := make(chan *models.Proxy, cfg.Server.ChannelBufferSize)
 	slog.Info("proxy channel created", "buffer_size", cfg.Server.ChannelBufferSize)
 
+	// Scanner mode selection
+	switch cfg.Scanner.Mode {
+	case "continuous":
+		slog.Info("starting scanner in continuous mode", "delay_sec", cfg.Scanner.ContinuousDelaySec)
+		go scan.RunContinuous(ctx, proxyCh, cfg.Scanner.ContinuousDelaySec)
+	case "interval":
+		slog.Info("starting scanner in interval mode", "interval_sec", cfg.Scanner.IntervalSec)
+		go scan.Run(ctx, proxyCh)
+	default:
+		slog.Warn("unknown scanner mode, falling back to interval", "mode", cfg.Scanner.Mode)
+		go scan.Run(ctx, proxyCh)
+	}
+
+	// Keepalive selection
+	if cfg.Validator.KeepaliveWorkers > 0 || cfg.Validator.KeepaliveUseMainChannel {
+		slog.Info("starting keepalive workers",
+			"workers", cfg.Validator.KeepaliveWorkers,
+			"use_main_channel", cfg.Validator.KeepaliveUseMainChannel,
+		)
+		go v.StartKeepaliveWorkers(ctx, cfg.Validator.KeepaliveWorkers, cfg.Validator.KeepaliveUseMainChannel, proxyCh)
+	} else {
+		slog.Info("starting sequential keepalive")
+		go v.StartKeepalive(ctx)
+	}
+
+	// Validator always runs
 	go func() { v.Run(ctx, proxyCh) }()
-	go func() { v.StartKeepalive(ctx) }()
-	go func() { scan.Run(ctx, proxyCh) }()
 
 	go func() {
 		for {
