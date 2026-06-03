@@ -28,14 +28,17 @@ type Config struct {
 
 // ServerConfig holds HTTP server configuration.
 type ServerConfig struct {
-	Host string `yaml:"host" json:"host"`
-	Port int    `yaml:"port" json:"port"`
+	Host              string `yaml:"host" json:"host"`
+	Port              int    `yaml:"port" json:"port"`
+	ChannelBufferSize int    `yaml:"channel_buffer_size" json:"channel_buffer_size"`
 }
 
 // ScannerConfig holds proxy scanner configuration.
 type ScannerConfig struct {
 	IntervalSec int            `yaml:"interval_sec" json:"interval_sec"`
 	Sources     []SourceConfig `yaml:"sources" json:"sources"`
+	Mode               string `yaml:"mode" json:"mode"`
+	ContinuousDelaySec int    `yaml:"continuous_delay_sec" json:"continuous_delay_sec"`
 }
 
 // ValidatorConfig holds proxy validator configuration.
@@ -45,6 +48,8 @@ type ValidatorConfig struct {
 	ProbeURL              string `yaml:"probe_url" json:"probe_url"`
 	KeepaliveIntervalSec  int    `yaml:"keepalive_interval_sec" json:"keepalive_interval_sec"`
 	MaxConsecutiveFails   int    `yaml:"max_consecutive_fails" json:"max_consecutive_fails"`
+	KeepaliveWorkers      int  `yaml:"keepalive_workers" json:"keepalive_workers"`
+	KeepaliveUseMainChannel bool `yaml:"keepalive_use_main_channel" json:"keepalive_use_main_channel"`
 }
 
 // StorageConfig holds storage backend configuration.
@@ -132,19 +137,24 @@ type ErrorResponse struct {
 func DefaultConfig() Config {
 	return Config{
 		Server: ServerConfig{
-			Host: "127.0.0.1",
-			Port: 8080,
+			Host:              "127.0.0.1",
+			Port:              8080,
+			ChannelBufferSize: 2000,
 		},
 		Scanner: ScannerConfig{
-			IntervalSec: 600,
-			Sources:     nil,
+			IntervalSec:        600,
+			Sources:            nil,
+			Mode:               "interval",
+			ContinuousDelaySec: 30,
 		},
 		Validator: ValidatorConfig{
-			Workers:              20,
-			TimeoutMs:            10000,
-			ProbeURL:             "http://httpbin.org/ip",
-			KeepaliveIntervalSec: 300,
-			MaxConsecutiveFails:  5,
+			Workers:                 20,
+			TimeoutMs:               10000,
+			ProbeURL:                "http://httpbin.org/ip",
+			KeepaliveIntervalSec:    300,
+			MaxConsecutiveFails:     5,
+			KeepaliveWorkers:        0,
+			KeepaliveUseMainChannel: false,
 		},
 		Storage: StorageConfig{
 			Backend: "sqlite",

@@ -60,7 +60,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	proxyCh := make(chan *models.Proxy, 2000)
+	proxyCh := make(chan *models.Proxy, cfg.Server.ChannelBufferSize)
+	slog.Info("proxy channel created", "buffer_size", cfg.Server.ChannelBufferSize)
 
 	go func() { v.Run(ctx, proxyCh) }()
 	go func() { v.StartKeepalive(ctx) }()

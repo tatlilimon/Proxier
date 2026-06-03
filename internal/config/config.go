@@ -71,6 +71,29 @@ func applyEnvOverrides(cfg *models.Config) {
 			cfg.Validator.MaxConsecutiveFails = n
 		}
 	}
+	if v := os.Getenv("SCANNER_MODE"); v != "" {
+		cfg.Scanner.Mode = v
+	}
+	if v := os.Getenv("SCANNER_CONTINUOUS_DELAY_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Scanner.ContinuousDelaySec = n
+		}
+	}
+	if v := os.Getenv("CHANNEL_BUFFER_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Server.ChannelBufferSize = n
+		}
+	}
+	if v := os.Getenv("KEEPALIVE_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Validator.KeepaliveWorkers = n
+		}
+	}
+	if v := os.Getenv("KEEPALIVE_USE_MAIN_CHANNEL"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.Validator.KeepaliveUseMainChannel = b
+		}
+	}
 	if v := os.Getenv("STORAGE_BACKEND"); v != "" {
 		cfg.Storage.Backend = v
 	}
