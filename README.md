@@ -34,8 +34,11 @@ Override any config value via environment variables:
 docker run -p 127.0.0.1:9090:9090 \
   -e HOST=0.0.0.0 \
   -e PORT=9090 \
+  -e SCANNER_MODE=continuous \
+  -e SCANNER_CONTINUOUS_DELAY_SEC=30 \
+  -e CHANNEL_BUFFER_SIZE=10000 \
+  -e KEEPALIVE_WORKERS=4 \
   -e VALIDATOR_WORKERS=50 \
-  -e SCANNER_INTERVAL_SEC=300 \
   proxier
 ```
 
@@ -46,6 +49,11 @@ By default the server binds to `127.0.0.1` (localhost only). Set `HOST=0.0.0.0` 
 | Variable | Default | Description |
 |---|---|---|
 | `HOST` | `127.0.0.1` | Address to bind the HTTP server to |
+| `SCANNER_MODE` | `interval` | `"interval"` or `"continuous"` — how the scanner fetches sources |
+| `SCANNER_CONTINUOUS_DELAY_SEC` | `30` | Seconds between fetch cycles in continuous mode |
+| `CHANNEL_BUFFER_SIZE` | `2000` | Proxy channel buffer capacity (higher = fewer drops, more memory) |
+| `KEEPALIVE_WORKERS` | `0` | Dedicated keepalive goroutines (0 = sequential, 4-10 recommended) |
+| `KEEPALIVE_USE_MAIN_CHANNEL` | `false` | Push keepalive re-checks through the main validator channel |
 | `PORT` | `8080` | HTTP server port |
 | `SCANNER_INTERVAL_SEC` | `600` | Source fetch interval |
 | `VALIDATOR_WORKERS` | `100` | Concurrent validation workers |
@@ -57,6 +65,42 @@ By default the server binds to `127.0.0.1` (localhost only). Set `HOST=0.0.0.0` 
 | `STORAGE_PATH` | `./proxies.db` | Persistence file path |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `PROXY_SOURCES` | — | Comma-separated URLs to append |
+
+## Performance Tuning
+
+The default settings favor safety over speed. For maximum throughput, enable continuous mode and parallel keepalive:
+
+```yaml
+# docker-compose.yml overrides
+environment:
+  - SCANNER_MODE=continuous
+  - SCANNER_CONTINUOUS_DELAY_SEC=30
+  - CHANNEL_BUFFER_SIZE=10000
+  - KEEPALIVE_WORKERS=4
+```
+
+### Scanner Mode
+
+- **`interval`** (default): Fetches sources on a fixed timer (`SCANNER_INTERVAL_SEC`). Idle between cycles — simpler, predictable.
+- **`continuous`**: Fetches in a tight loop with a configurable delay between cycles. Keeps the validator workers continuously fed. Use when you want maximum proxy freshness and throughput.
+
+In continuous mode, the delay applies AFTER a full fetch cycle completes (including HTTP fetch time for all 14 sources), not between individual source fetches.
+
+### Channel Buffer Size
+
+The channel buffers proxies between scanner and validator. A larger buffer accepts more proxies per cycle (fewer drops) but uses more memory. With 100 validator workers processing at ~500 proxies/sec (burst), a 10,000-slot buffer drains in ~20 seconds. Increase if `scanner.dropped` is high in `/stats`.
+
+### Keepalive Workers
+
+By default, the keepalive loop re-validates all ALIVE proxies sequentially (one at a time, single goroutine). With 15,000+ alive proxies and ~200ms avg latency, this can take 50+ minutes per cycle.
+
+Setting `KEEPALIVE_WORKERS=4` spawns 4 dedicated goroutines that re-validate ALIVE proxies in parallel via a dedicated work-queue channel. Each proxy is re-validated exactly once (no duplicate work). Recommended: 4-10 workers depending on pool size.
+
+### Main Channel Push
+
+When `KEEPALIVE_USE_MAIN_CHANNEL=true`, keepalive re-checks are also pushed into the main proxy channel — the same channel the 100 validator workers consume from. This reuses existing capacity instead of spawning dedicated workers. Useful alone (`KEEPALIVE_WORKERS=0`) or combined with dedicated workers.
+
+**Trade-off**: Keepalive proxies compete with fresh scanner proxies in the same channel. If the scanner is in continuous mode, fresh proxies take priority naturally.
 
 ### Adding Sources
 

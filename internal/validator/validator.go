@@ -159,6 +159,126 @@ func (v *Validator) StartKeepalive(ctx context.Context) {
 	}
 }
 
+// StartKeepaliveWorkers parallelizes keepalive re-validation with dedicated
+// workers and optional main-channel push. When count <= 0 and useMainChannel
+// is false, it falls back to the existing sequential StartKeepalive.
+func (v *Validator) StartKeepaliveWorkers(ctx context.Context, count int, useMainChannel bool, mainCh chan<- *models.Proxy) {
+	if count <= 0 && !useMainChannel {
+		v.StartKeepalive(ctx)
+		return
+	}
+
+	keepaliveCh := make(chan *models.Proxy, 5000)
+
+	if count > 0 {
+		for i := 0; i < count; i++ {
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case p, ok := <-keepaliveCh:
+						if !ok {
+							return
+						}
+						v.validateOne(ctx, p)
+					}
+				}
+			}()
+		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(v.keepaliveInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				aliveProxies := v.collectAliveProxies()
+				slog.Info("keepalive cycle start", "alive_count", len(aliveProxies), "workers", count, "use_main_channel", useMainChannel)
+
+				for _, p := range aliveProxies {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					if count > 0 {
+						keepaliveCh <- p
+					}
+
+					if useMainChannel {
+						select {
+						case mainCh <- p:
+						default:
+						}
+					}
+				}
+
+				// Phase 2: Retry stuck VALIDATING proxies — up to 100 per cycle, cooldown 60s.
+				validatingCount := 0
+				for _, p := range v.pool.All() {
+					if validatingCount >= 100 {
+						break
+					}
+					if p.State != models.StateValidating {
+						continue
+					}
+					if time.Since(p.LastChecked) < 60*time.Second {
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						slog.Info("keepalive retrying stuck validating proxy", "address", p.Address(), "fails", p.ConsecutiveFail)
+						v.validateOne(ctx, p)
+						validatingCount++
+					}
+				}
+
+				// Phase 3: Retry recently-dead proxies — up to 50 per cycle, dead within the last hour.
+				deadCount := 0
+				for _, p := range v.pool.All() {
+					if deadCount >= 50 {
+						break
+					}
+					if p.State != models.StateDead {
+						continue
+					}
+					if time.Since(p.LastChecked) > time.Hour {
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						slog.Info("keepalive retrying recently-dead proxy", "address", p.Address())
+						v.validateOne(ctx, p)
+						deadCount++
+					}
+				}
+			}
+		}
+	}()
+}
+
+// collectAliveProxies returns a slice of all proxies currently in the ALIVE state.
+func (v *Validator) collectAliveProxies() []*models.Proxy {
+	all := v.pool.All()
+	alive := make([]*models.Proxy, 0, len(all))
+	for _, p := range all {
+		if p.State == models.StateAlive {
+			alive = append(alive, p)
+		}
+	}
+	return alive
+}
+
 // validateOne tests a single proxy, updates its state and health score, and
 // writes the result back to the pool.
 func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {

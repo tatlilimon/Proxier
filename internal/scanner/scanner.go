@@ -127,6 +127,83 @@ func (s *Scanner) runOnce(ctx context.Context, output chan<- *models.Proxy, seen
 	}
 }
 
+// fetchAllSources fetches every source sequentially, deduplicates the result
+// against the seen map, and returns only new proxies. It does NOT write to the
+// output channel. The caller is responsible for forwarding the result.
+func (s *Scanner) fetchAllSources(ctx context.Context, seen map[string]time.Time) []*models.Proxy {
+	s.cleanupSeen(seen)
+
+	var all []*models.Proxy
+
+	for _, src := range s.sources {
+		proxies, err := s.fetchSource(ctx, src)
+		if err != nil {
+			slog.Warn("scanner skipping source", "url", src.URL, "error", err)
+			continue
+		}
+		all = append(all, proxies...)
+	}
+
+	return s.deduplicate(all, seen)
+}
+
+// pushToChannel sends proxies to the output channel with non-blocking sends.
+// Dropped proxies (when the channel is full) are counted via the shared atomic
+// counter and also returned so the caller can report per-cycle statistics.
+func (s *Scanner) pushToChannel(ctx context.Context, output chan<- *models.Proxy, proxies []*models.Proxy) int {
+	dropped := 0
+	for _, p := range proxies {
+		select {
+		case <-ctx.Done():
+			return dropped
+		case output <- p:
+		default:
+			s.dropped.Add(1)
+			dropped++
+		}
+	}
+	return dropped
+}
+
+// RunContinuous runs a tight fetch→push→sleep loop. Every cycle fetches all
+// sources, deduplicates against a rolling seen window, pushes new proxies to
+// the output channel, and then sleeps for delaySec seconds. The delay applies
+// after the cycle completes (including fetch time). The loop exits when ctx is
+// cancelled.
+func (s *Scanner) RunContinuous(ctx context.Context, output chan<- *models.Proxy, delaySec int) {
+	seen := make(map[string]time.Time)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		start := time.Now()
+
+		newProxies := s.fetchAllSources(ctx, seen)
+
+		droppedThisCycle := s.pushToChannel(ctx, output, newProxies)
+
+		s.mu.Lock()
+		s.lastRun = start
+		s.nextRun = start.Add(time.Duration(delaySec) * time.Second)
+		s.lastFetchCount = len(newProxies)
+		s.lastDurationMs = time.Since(start).Milliseconds()
+		s.totalDiscovered += int64(len(newProxies))
+		s.mu.Unlock()
+
+		slog.Info("continuous scan cycle",
+			"fetched", len(newProxies),
+			"dropped", droppedThisCycle,
+			"next_delay_sec", delaySec,
+		)
+
+		time.Sleep(time.Duration(delaySec) * time.Second)
+	}
+}
+
 // fetchSource downloads a proxy list from the given source and dispatches to
 // the correct parser based on the source's Format field.
 func (s *Scanner) fetchSource(ctx context.Context, src models.SourceConfig) ([]*models.Proxy, error) {
