@@ -60,7 +60,7 @@ func NewServer(
 	mux.HandleFunc("GET /metrics", metrics.New(p, s, v, srv.startTime).Handler())
 
 	srv.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler: srv.loggingMiddleware(mux),
 	}
 

@@ -28,7 +28,8 @@ type Config struct {
 
 // ServerConfig holds HTTP server configuration.
 type ServerConfig struct {
-	Port int `yaml:"port" json:"port"`
+	Host string `yaml:"host" json:"host"`
+	Port int    `yaml:"port" json:"port"`
 }
 
 // ScannerConfig holds proxy scanner configuration.
@@ -131,6 +132,7 @@ type ErrorResponse struct {
 func DefaultConfig() Config {
 	return Config{
 		Server: ServerConfig{
+			Host: "127.0.0.1",
 			Port: 8080,
 		},
 		Scanner: ScannerConfig{

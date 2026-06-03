@@ -35,6 +35,9 @@ func Load(path string) (*models.Config, error) {
 }
 
 func applyEnvOverrides(cfg *models.Config) {
+	if v := os.Getenv("HOST"); v != "" {
+		cfg.Server.Host = v
+	}
 	if v := os.Getenv("PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Server.Port = n

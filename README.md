@@ -31,17 +31,21 @@ go build -o proxier ./cmd/proxier/
 Override any config value via environment variables:
 
 ```bash
-docker run -p 9090:9090 \
+docker run -p 127.0.0.1:9090:9090 \
+  -e HOST=0.0.0.0 \
   -e PORT=9090 \
   -e VALIDATOR_WORKERS=50 \
   -e SCANNER_INTERVAL_SEC=300 \
   proxier
 ```
 
+By default the server binds to `127.0.0.1` (localhost only). Set `HOST=0.0.0.0` to listen on all interfaces — useful inside Docker for inter-container communication.
+
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
+| `HOST` | `127.0.0.1` | Address to bind the HTTP server to |
 | `PORT` | `8080` | HTTP server port |
 | `SCANNER_INTERVAL_SEC` | `600` | Source fetch interval |
 | `VALIDATOR_WORKERS` | `100` | Concurrent validation workers |
