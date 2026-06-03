@@ -125,23 +125,45 @@ func (s *Scanner) runOnce(ctx context.Context, output chan<- *models.Proxy, seen
 	}
 }
 
-// fetchAllSources fetches every source sequentially, deduplicates the result
-// against the seen map, and returns only new proxies. It does NOT write to the
-// output channel. The caller is responsible for forwarding the result.
+// fetchAllSources fetches every source in parallel (max 5 concurrent),
+// deduplicates the result against the seen map, and returns only new proxies.
+// It does NOT write to the output channel. The caller is responsible for
+// forwarding the result.
 func (s *Scanner) fetchAllSources(ctx context.Context, seen map[string]time.Time) []*models.Proxy {
 	s.cleanupSeen(seen)
 
-	var all []*models.Proxy
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		all       []*models.Proxy
+		semaphore = make(chan struct{}, 5)
+	)
 
 	for _, src := range s.sources {
-		proxies, err := s.fetchSource(ctx, src)
-		if err != nil {
-			slog.Warn("scanner skipping source", "url", src.URL, "error", err)
-			continue
-		}
-		all = append(all, proxies...)
+		wg.Add(1)
+		go func(src models.SourceConfig) {
+			defer wg.Done()
+
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-semaphore }()
+
+			proxies, err := s.fetchSource(ctx, src)
+			if err != nil {
+				slog.Warn("scanner skipping source", "url", src.URL, "error", err)
+				return
+			}
+
+			mu.Lock()
+			all = append(all, proxies...)
+			mu.Unlock()
+		}(src)
 	}
 
+	wg.Wait()
 	return s.deduplicate(all, seen)
 }
 
