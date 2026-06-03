@@ -49,6 +49,7 @@ func main() {
 	for _, proxy := range proxies {
 		p.Add(proxy)
 	}
+	p.SeedCounters()
 	slog.Info("loaded proxies from storage", "count", len(proxies))
 
 	interval := time.Duration(cfg.Scanner.IntervalSec) * time.Second

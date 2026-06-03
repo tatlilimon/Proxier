@@ -255,6 +255,39 @@ func (p *Pool) DirtyAll() []*models.Proxy {
 	return result
 }
 
+// SeedCounters recalibrates all atomic state counters to match the actual
+// proxy states in the pool. Call after bulk-loading proxies from storage so
+// counters start from a known-correct baseline when the pool is populated.
+func (p *Pool) SeedCounters() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var total, alive, validating, dead int64
+	protoCounts := make(map[string]int64)
+
+	for _, proxy := range p.proxies {
+		total++
+		switch proxy.State {
+		case models.StateAlive:
+			alive++
+			protoCounts[string(proxy.Protocol)]++
+		case models.StateValidating:
+			validating++
+		case models.StateDead:
+			dead++
+		}
+	}
+
+	p.totalVal.Store(total)
+	p.aliveVal.Store(alive)
+	p.validatingVal.Store(validating)
+	p.deadVal.Store(dead)
+
+	p.protoMu.Lock()
+	p.protoCount = protoCounts
+	p.protoMu.Unlock()
+}
+
 // DetailedStats returns comprehensive pool statistics. Counts come from
 // atomic counters (no proxy iteration). Protocol counts and health score
 // averages use lightweight, dedicated locks.

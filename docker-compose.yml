@@ -15,6 +15,12 @@ services:
       - STORAGE_PATH=/data/proxies.db
       - LOG_LEVEL=info
       - VALIDATOR_PROBE_URL=https://httpbin.org/ip
+      - VALIDATOR_TIMEOUT_MS=2000
+      - SCANNER_MODE=continuous
+      - SCANNER_CONTINUOUS_DELAY_SEC=30
+      - CHANNEL_BUFFER_SIZE=10000
+      - KEEPALIVE_WORKERS=4
+      - KEEPALIVE_USE_MAIN_CHANNEL=true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
