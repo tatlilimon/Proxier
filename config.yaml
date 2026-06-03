@@ -9,6 +9,7 @@ scanner:
   # "interval" = ticker-based (every interval_sec) | "continuous" = tight loop with delay
   mode: "interval"
   continuous_delay_sec: 30    # Seconds between fetch cycles in continuous mode
+  dedup_ttl_sec: 1800         # Seconds before a seen proxy is re-allowed into the pipeline
   interval_sec: 600          # How often the scanner runs (10 min)
   sources:
     # Direct APIs (cleanest output)

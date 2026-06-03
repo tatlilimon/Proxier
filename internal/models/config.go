@@ -39,6 +39,7 @@ type ScannerConfig struct {
 	Sources     []SourceConfig `yaml:"sources" json:"sources"`
 	Mode               string `yaml:"mode" json:"mode"`
 	ContinuousDelaySec int    `yaml:"continuous_delay_sec" json:"continuous_delay_sec"`
+	DedupTTLSec        int    `yaml:"dedup_ttl_sec" json:"dedup_ttl_sec"`
 }
 
 // ValidatorConfig holds proxy validator configuration.
@@ -146,6 +147,7 @@ func DefaultConfig() Config {
 			Sources:            nil,
 			Mode:               "interval",
 			ContinuousDelaySec: 30,
+			DedupTTLSec:        1800,
 		},
 		Validator: ValidatorConfig{
 			Workers:                 20,

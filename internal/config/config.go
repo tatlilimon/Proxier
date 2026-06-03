@@ -79,6 +79,11 @@ func applyEnvOverrides(cfg *models.Config) {
 			cfg.Scanner.ContinuousDelaySec = n
 		}
 	}
+	if v := os.Getenv("SCANNER_DEDUP_TTL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Scanner.DedupTTLSec = n
+		}
+	}
 	if v := os.Getenv("CHANNEL_BUFFER_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Server.ChannelBufferSize = n

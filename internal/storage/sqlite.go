@@ -100,6 +100,54 @@ func (s *sqliteStore) Save(p *models.Proxy) error {
 	return nil
 }
 
+func (s *sqliteStore) SaveBatch(proxies []*models.Proxy) error {
+	if len(proxies) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("sqlite: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO proxies
+		(id, host, port, protocol, state, health_score, latency_ms, country, anonymity,
+		 consecutive_ok, consecutive_fail, first_seen, last_checked, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("sqlite: prepare batch: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, p := range proxies {
+		_, err := stmt.Exec(
+			p.ID,
+			p.Host,
+			p.Port,
+			string(p.Protocol),
+			string(p.State),
+			p.HealthScore,
+			p.LatencyMs,
+			p.Country,
+			string(p.Anonymity),
+			p.ConsecutiveOK,
+			p.ConsecutiveFail,
+			p.FirstSeen.Format(time.RFC3339),
+			p.LastChecked.Format(time.RFC3339),
+			p.Source,
+		)
+		if err != nil {
+			return fmt.Errorf("sqlite: batch exec: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit batch: %w", err)
+	}
+	return nil
+}
+
 func (s *sqliteStore) LoadAll() ([]*models.Proxy, error) {
 	rows, err := s.loadStmt.Query()
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 // Store defines the persistence interface for proxy records.
 type Store interface {
 	Save(p *models.Proxy) error
+	SaveBatch(proxies []*models.Proxy) error
 	LoadAll() ([]*models.Proxy, error)
 	Delete(id string) error
 	Close() error

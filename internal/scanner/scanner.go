@@ -19,16 +19,13 @@ import (
 	"github.com/tatlilimon/proxier/internal/models"
 )
 
-// seenTTL is the duration a seen proxy address remains in the deduplication
-// map before it is eligible for re-entry into the validation pipeline.
-const seenTTL = 30 * time.Minute
-
 // Scanner fetches proxy lists from configured sources and forwards discovered
 // proxies to a downstream consumer via a channel.
 type Scanner struct {
 	sources    []models.SourceConfig
 	httpClient *http.Client
 	interval   time.Duration
+	dedupTTL   time.Duration
 
 	mu              sync.Mutex
 	lastRun         time.Time
@@ -41,9 +38,9 @@ type Scanner struct {
 	dropped atomic.Int64
 }
 
-// NewScanner creates a new Scanner with the given proxy sources and scan
-// interval.
-func NewScanner(sources []models.SourceConfig, interval time.Duration) *Scanner {
+// NewScanner creates a new Scanner with the given proxy sources, scan
+// interval, and deduplication TTL.
+func NewScanner(sources []models.SourceConfig, interval time.Duration, dedupTTL time.Duration) *Scanner {
 	return &Scanner{
 		sources: sources,
 		httpClient: &http.Client{
@@ -57,6 +54,7 @@ func NewScanner(sources []models.SourceConfig, interval time.Duration) *Scanner 
 			},
 		},
 		interval: interval,
+		dedupTTL: dedupTTL,
 	}
 }
 
@@ -339,15 +337,15 @@ func (s *Scanner) parseJSON(body []byte, src models.SourceConfig) []*models.Prox
 }
 
 // deduplicate filters proxies, keeping only those whose host:port key is not
-// present in the recent-seen window. Entries older than seenTTL are re-allowed
-// and their timestamp is refreshed. Fresh entries are skipped.
+// present in the recent-seen window. Entries older than the dedup TTL are
+// re-allowed and their timestamp is refreshed. Fresh entries are skipped.
 func (s *Scanner) deduplicate(proxies []*models.Proxy, seen map[string]time.Time) []*models.Proxy {
 	out := make([]*models.Proxy, 0, len(proxies))
 	now := time.Now()
 	for _, p := range proxies {
 		key := p.Address()
 		if lastSeen, ok := seen[key]; ok {
-			if now.Sub(lastSeen) < seenTTL {
+			if now.Sub(lastSeen) < s.dedupTTL {
 				continue
 			}
 			slog.Info("scanner re-allowing stale proxy", "address", key, "age", now.Sub(lastSeen).Truncate(time.Second).String())
@@ -358,10 +356,10 @@ func (s *Scanner) deduplicate(proxies []*models.Proxy, seen map[string]time.Time
 	return out
 }
 
-// cleanupSeen removes entries from the seen map that are older than seenTTL,
-// preventing unbounded memory growth.
+// cleanupSeen removes entries from the seen map that are older than the dedup
+// TTL, preventing unbounded memory growth.
 func (s *Scanner) cleanupSeen(seen map[string]time.Time) {
-	cutoff := time.Now().Add(-seenTTL)
+	cutoff := time.Now().Add(-s.dedupTTL)
 	for key, ts := range seen {
 		if ts.Before(cutoff) {
 			delete(seen, key)

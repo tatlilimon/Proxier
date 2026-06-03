@@ -35,6 +35,7 @@ type Validator struct {
 	keepaliveInterval time.Duration
 	pool              Pool
 	httpClient        *http.Client
+	sharedTransport   *http.Transport
 
 	checked      atomic.Int64
 	totalLatency atomic.Int64
@@ -44,7 +45,7 @@ type Validator struct {
 
 // NewValidator creates a Validator with the given configuration and pool.
 func NewValidator(cfg models.ValidatorConfig, pool Pool) *Validator {
-	return &Validator{
+	v := &Validator{
 		workers:           cfg.Workers,
 		timeout:           time.Duration(cfg.TimeoutMs) * time.Millisecond,
 		probeURL:          cfg.ProbeURL,
@@ -58,6 +59,19 @@ func NewValidator(cfg models.ValidatorConfig, pool Pool) *Validator {
 			},
 		},
 	}
+
+	v.sharedTransport = &http.Transport{
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		DisableKeepAlives:     false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	return v
 }
 
 // Run starts the validator worker pool. It reads proxies from the input
@@ -362,14 +376,7 @@ func (v *Validator) handleFailure(p *models.Proxy) {
 // HTTP/HTTPS proxies use http.ProxyURL. SOCKS5 uses golang.org/x/net/proxy.
 // SOCKS4 uses a custom dialer that speaks the SOCKS4/SOCKS4a protocol directly.
 func (v *Validator) createTransport(p *models.Proxy) (*http.Transport, error) {
-	transport := &http.Transport{
-		TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
-		DisableKeepAlives:  true,
-		IdleConnTimeout:    90 * time.Second,
-		MaxConnsPerHost:    2,
-		MaxIdleConns:       0,
-		MaxIdleConnsPerHost: 0,
-	}
+	transport := v.sharedTransport.Clone()
 
 	switch p.Protocol {
 	case models.ProtoHTTP, models.ProtoHTTPS:

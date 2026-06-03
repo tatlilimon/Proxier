@@ -53,7 +53,8 @@ func main() {
 	slog.Info("loaded proxies from storage", "count", len(proxies))
 
 	interval := time.Duration(cfg.Scanner.IntervalSec) * time.Second
-	scan := scanner.NewScanner(cfg.Scanner.Sources, interval)
+	scan := scanner.NewScanner(cfg.Scanner.Sources, interval,
+		time.Duration(cfg.Scanner.DedupTTLSec)*time.Second)
 
 	v := validator.NewValidator(cfg.Validator, p)
 	srv := server.NewServer(cfg.Server, p, v, scan, cfg.Validator.ProbeURL)
@@ -97,7 +98,7 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(30 * time.Second):
+			case <-time.After(5 * time.Second):
 				persistPool(store, p)
 			}
 		}
@@ -125,10 +126,11 @@ func main() {
 
 func persistPool(store storage.Store, p *pool.Pool) {
 	proxies := p.DirtyAll()
-	for _, proxy := range proxies {
-		if err := store.Save(proxy); err != nil {
-			slog.Warn("failed to persist proxy", "address", proxy.Address(), "error", err)
-		}
+	if len(proxies) == 0 {
+		return
+	}
+	if err := store.SaveBatch(proxies); err != nil {
+		slog.Warn("failed to persist proxy batch", "count", len(proxies), "error", err)
 	}
 }
 
