@@ -152,7 +152,7 @@ func DefaultConfig() Config {
 		Validator: ValidatorConfig{
 			Workers:                 20,
 			TimeoutMs:               10000,
-			ProbeURL:                "http://httpbin.org/ip",
+			ProbeURL:                "https://httpbin.org/ip",
 			KeepaliveIntervalSec:    300,
 			MaxConsecutiveFails:     5,
 			KeepaliveWorkers:        0,

@@ -60,7 +60,7 @@ scanner:
 validator:
   workers: 100                # Concurrent validation goroutines (100 = fast throughput)
   timeout_ms: 5000            # Per-proxy validation timeout (5s)
-  probe_url: "http://httpbin.org/ip"
+  probe_url: "https://httpbin.org/ip"
   keepalive_interval_sec: 120 # Re-check ALIVE proxies every 2 min
   max_consecutive_fails: 3    # ALIVE → DEAD after 3 consecutive failures
   keepalive_workers: 0             # Dedicated keepalive goroutines (0 = sequential, 4-10 recommended)

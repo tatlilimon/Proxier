@@ -3,6 +3,7 @@ package validator
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -41,6 +42,8 @@ type Validator struct {
 	totalLatency atomic.Int64
 	successCount atomic.Int64
 	failureCount atomic.Int64
+
+	selfIP string
 }
 
 // NewValidator creates a Validator with the given configuration and pool.
@@ -70,6 +73,8 @@ func NewValidator(cfg models.ValidatorConfig, pool Pool) *Validator {
 		ResponseHeaderTimeout: 10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
+
+	v.detectSelfIP()
 
 	return v
 }
@@ -339,6 +344,15 @@ func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {
 		return
 	}
 
+	if v.selfIP != "" {
+		originIP := parseOriginIP(resp)
+		if originIP == v.selfIP {
+			slog.Warn("validator proxy NOT routing", "address", p.Address(), "origin", originIP)
+			v.handleFailure(p)
+			return
+		}
+	}
+
 	p.LatencyMs = int(latency.Milliseconds())
 	p.ConsecutiveOK++
 	p.ConsecutiveFail = 0
@@ -486,4 +500,47 @@ func (v *Validator) DetailedStats() models.ValidatorStats {
 		SuccessRate:  rate,
 		AvgLatencyMs: avgLat,
 	}
+}
+
+// detectSelfIP fetches our own public IP via the probe URL to detect
+// proxies that accept connections but don't actually route traffic.
+func (v *Validator) detectSelfIP() {
+	client := &http.Client{
+		Timeout: v.timeout,
+		Transport: &http.Transport{
+			TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
+			DisableKeepAlives:  true,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+	}
+
+	resp, err := client.Get(v.probeURL)
+	if err != nil {
+		slog.Warn("failed to detect self IP, routing verification disabled", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	ip := parseOriginIP(resp)
+	if ip == "" {
+		slog.Warn("failed to parse self IP from probe response, routing verification disabled")
+		return
+	}
+
+	v.selfIP = ip
+	slog.Info("self IP detected for routing verification", "ip", ip)
+}
+
+type originResponse struct {
+	Origin string `json:"origin"`
+}
+
+// parseOriginIP extracts the origin IP from an httpbin-style JSON response
+// body. Returns "" on any parse error (caller should treat as indeterminate).
+func parseOriginIP(resp *http.Response) string {
+	var body originResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ""
+	}
+	return body.Origin
 }
