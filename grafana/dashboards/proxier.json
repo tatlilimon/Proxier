@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -8,7 +10,12 @@
   "panels": [
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 100,
       "title": "Pool Overview",
       "type": "row"
@@ -16,19 +23,29 @@
     {
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [],
           "noValue": "0",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
       "options": {
         "colorMode": "value",
@@ -39,7 +56,7 @@
       },
       "targets": [
         {
-          "expr": "proxier_pool_total",
+          "expr": "proxier_pool_records",
           "refId": "A"
         }
       ],
@@ -49,20 +66,36 @@
     {
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 10 },
-              { "color": "green", "value": 100 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 100
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
       "id": 2,
       "options": {
         "colorMode": "value",
@@ -83,20 +116,36 @@
     {
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 100 },
-              { "color": "red", "value": 500 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
       "id": 3,
       "options": {
         "colorMode": "value",
@@ -117,18 +166,28 @@
     {
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null }
+              {
+                "color": "green",
+                "value": null
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
       "id": 4,
       "options": {
         "colorMode": "value",
@@ -152,54 +211,203 @@
           "unit": "none"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "alive" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "dead" }, "properties": [{ "id": "color", "value": { "fixedColor": "#F2495C", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "validating" }, "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "alive"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dead"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2495C",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "validating"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
       "id": 5,
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        { "expr": "proxier_pool_alive", "legendFormat": "alive", "refId": "A" },
-        { "expr": "proxier_pool_dead", "legendFormat": "dead", "refId": "B" },
-        { "expr": "proxier_pool_validating", "legendFormat": "validating", "refId": "C" }
+        {
+          "expr": "proxier_pool_alive",
+          "legendFormat": "alive",
+          "refId": "A"
+        },
+        {
+          "expr": "proxier_pool_dead",
+          "legendFormat": "dead",
+          "refId": "B"
+        },
+        {
+          "expr": "proxier_pool_validating",
+          "legendFormat": "validating",
+          "refId": "C"
+        },
+        {
+          "expr": "proxier_pool_discovered",
+          "legendFormat": "waiting for first check",
+          "refId": "D"
+        }
       ],
       "title": "Pool State Over Time",
       "type": "timeseries"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "none" },
+        "defaults": {
+          "unit": "none"
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "http" }, "properties": [{ "id": "color", "value": { "fixedColor": "#5794F2", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "socks4" }, "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "socks5" }, "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "http"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "socks4"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "socks5"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 5 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
       "id": 6,
       "options": {
-        "displayLabels": ["name", "value"],
-        "legend": { "displayMode": "list", "placement": "bottom" },
+        "displayLabels": [
+          "name",
+          "value"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
         "pieType": "pie",
-        "tooltip": { "mode": "single" }
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
-        { "expr": "proxier_pool_protocol_count", "legendFormat": "{{protocol}}", "refId": "A" }
+        {
+          "expr": "proxier_pool_alive_by_protocol",
+          "legendFormat": "{{protocol}}",
+          "refId": "A"
+        }
       ],
       "title": "Protocol Distribution",
       "type": "piechart"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "s" },
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 5 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
       "id": 7,
       "options": {
         "colorMode": "value",
@@ -209,120 +417,248 @@
         "textMode": "auto"
       },
       "targets": [
-        { "expr": "proxier_uptime_seconds", "refId": "A" }
+        {
+          "expr": "proxier_uptime_seconds",
+          "refId": "A"
+        }
       ],
       "title": "Uptime",
       "type": "stat"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
       "id": 200,
       "title": "Validator",
       "type": "row"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "ops" },
+        "defaults": {
+          "unit": "cpm"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 14 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 14
+      },
       "id": 8,
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        { "expr": "rate(proxier_validator_checks_total[1m]) * 60", "legendFormat": "checks/min", "refId": "A" },
-        { "expr": "rate(proxier_validator_success_total[1m]) * 60", "legendFormat": "success/min", "refId": "B" },
-        { "expr": "rate(proxier_validator_failure_total[1m]) * 60", "legendFormat": "failure/min", "refId": "C" }
+        {
+          "expr": "rate(proxier_validator_checks_total[5m]) * 60",
+          "legendFormat": "checks/min",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(proxier_validator_success_total[5m]) * 60",
+          "legendFormat": "success/min",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(proxier_validator_failure_total[5m]) * 60",
+          "legendFormat": "failure/min",
+          "refId": "C"
+        }
       ],
       "title": "Validation Throughput",
       "type": "timeseries"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "percent", "max": 100, "min": 0 },
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "min": 0
+        },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 14 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 14
+      },
       "id": 9,
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
-        { "expr": "proxier_validator_success_rate_pct", "legendFormat": "success rate", "refId": "A" }
+        {
+          "expr": "proxier_validator_success_rate_pct",
+          "legendFormat": "success rate",
+          "refId": "A"
+        }
       ],
       "title": "Success Rate",
       "type": "timeseries"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "ms" },
+        "defaults": {
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 14 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 14
+      },
       "id": 10,
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
-        { "expr": "proxier_validator_avg_latency_ms", "legendFormat": "avg latency", "refId": "A" }
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(proxier_validator_success_latency_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(proxier_validator_success_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(proxier_validator_success_latency_seconds_sum[5m]) / rate(proxier_validator_success_latency_seconds_count[5m])",
+          "legendFormat": "mean",
+          "refId": "C"
+        }
       ],
-      "title": "Avg Latency",
+      "title": "Successful Check Latency",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
       "id": 300,
       "title": "Scanner",
       "type": "row"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "unit": "short"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 22 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
       "id": 11,
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "targets": [
-        { "expr": "proxier_scanner_discovered_total", "legendFormat": "total discovered", "refId": "A" },
-        { "expr": "proxier_scanner_last_fetch_count", "legendFormat": "last fetch count", "refId": "B" },
-        { "expr": "proxier_scanner_dropped_total", "legendFormat": "dropped", "refId": "C" }
+        {
+          "expr": "rate(proxier_scanner_discovered_total[15m]) * 60",
+          "legendFormat": "new proxies/min",
+          "refId": "A"
+        },
+        {
+          "expr": "proxier_scanner_last_fetched",
+          "legendFormat": "fetched last cycle",
+          "refId": "B"
+        },
+        {
+          "expr": "proxier_scanner_last_new",
+          "legendFormat": "new last cycle",
+          "refId": "C"
+        }
       ],
       "title": "Scanner Activity",
       "type": "timeseries"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "ms" },
+        "defaults": {
+          "unit": "s"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 22 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 22
+      },
       "id": 12,
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
-        { "expr": "proxier_scanner_last_duration_ms", "legendFormat": "last duration", "refId": "A" }
+        {
+          "expr": "proxier_scanner_last_duration_seconds",
+          "legendFormat": "last duration",
+          "refId": "A"
+        }
       ],
       "title": "Scan Duration",
       "type": "timeseries"
     },
     {
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "unit": "short"
+        },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 22 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 22
+      },
       "id": 13,
       "options": {
         "colorMode": "value",
@@ -332,17 +668,33 @@
         "textMode": "auto"
       },
       "targets": [
-        { "expr": "proxier_scanner_sources", "refId": "A" }
+        {
+          "expr": "proxier_scanner_sources_ok",
+          "refId": "A",
+          "legendFormat": "healthy"
+        },
+        {
+          "expr": "proxier_scanner_sources",
+          "refId": "B",
+          "legendFormat": "configured"
+        }
       ],
-      "title": "Active Sources",
+      "title": "Sources (healthy / configured)",
       "type": "stat"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
-  "tags": ["proxier"],
-  "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "tags": [
+    "proxier"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "Proxier",

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +96,20 @@ func TestLatencyHistogramIsRealAndCumulative(t *testing.T) {
 	for _, name := range []string{"proxier_pool_alive 2", `proxier_pool_alive_by_protocol{protocol="socks5"} 1`, "proxier_storage_pending 3", `proxier_scanner_source_up{source="https://lists.example/x.txt"} 0`} {
 		if !strings.Contains(body, name) {
 			t.Errorf("missing %q", name)
+		}
+	}
+}
+
+// The provisioned dashboard must only query metrics that exist.
+func TestDashboardQueriesExistingMetrics(t *testing.T) {
+	data, err := os.ReadFile("../../grafana/dashboards/proxier.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := scrape(t)
+	for _, name := range regexp.MustCompile(`proxier_[a-z_]+`).FindAllString(string(data), -1) {
+		if !strings.Contains(body, "\n"+name) && !strings.HasPrefix(body, name) {
+			t.Errorf("dashboard queries %s, which /metrics does not export", name)
 		}
 	}
 }
