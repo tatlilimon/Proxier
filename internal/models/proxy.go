@@ -103,13 +103,13 @@ type Proxy struct {
 	Source          string     `json:"source"`
 
 	// LastSuccess is the time of the most recent successful check.
-	LastSuccess time.Time `json:"last_success,omitempty"`
+	LastSuccess time.Time `json:"last_success,omitzero"`
 	// DiedAt is when the proxy last became DEAD (zero while it is not dead).
-	DiedAt time.Time `json:"died_at,omitempty"`
+	DiedAt time.Time `json:"died_at,omitzero"`
 	// NextCheck is when the proxy is due for its next check. A zero value
 	// means "now" for every state except DEAD, where it means "never" (until
 	// a source lists the proxy again).
-	NextCheck time.Time `json:"next_check,omitempty"`
+	NextCheck time.Time `json:"next_check,omitzero"`
 
 	// Version is the pool's mutation counter at the record's last change and
 	// Dirty marks changes not yet acknowledged by storage. Both are

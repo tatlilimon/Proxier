@@ -117,7 +117,7 @@ type SourceStatus struct {
 	Protocol    Protocol  `json:"protocol"`
 	OK          bool      `json:"ok"`
 	LastAttempt time.Time `json:"last_attempt"`
-	LastSuccess time.Time `json:"last_success,omitempty"`
+	LastSuccess time.Time `json:"last_success,omitzero"`
 	LastCount   int       `json:"last_count"`
 	LastError   string    `json:"last_error,omitempty"`
 }
@@ -166,7 +166,7 @@ type ValidatorStats struct {
 type StorageStats struct {
 	Pending     int       `json:"pending"`
 	Failures    int64     `json:"failures"`
-	LastSuccess time.Time `json:"last_success,omitempty"`
+	LastSuccess time.Time `json:"last_success,omitzero"`
 	LastError   string    `json:"last_error,omitempty"`
 }
 

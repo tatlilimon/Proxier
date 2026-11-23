@@ -192,3 +192,18 @@ func TestHealthReadyAndStats(t *testing.T) {
 		t.Errorf("/proxy = %d %v", rec.Code, out)
 	}
 }
+
+func TestStatsOmitsUnsetTimes(t *testing.T) {
+	a := newAPI(t, true)
+	a.srv.storage = fakeStorageStats{}
+	rec, _ := a.do(t, "GET", "/stats", "")
+	// last_run/next_run keep their 1.4 shape (always present); the new
+	// optional timestamps are omitted until set.
+	if strings.Contains(rec.Body.String(), `"last_success":"0001-01-01`) {
+		t.Fatalf("/stats shows a zero last_success: %s", rec.Body)
+	}
+}
+
+type fakeStorageStats struct{}
+
+func (fakeStorageStats) Stats() models.StorageStats { return models.StorageStats{} }
