@@ -202,8 +202,17 @@ func TestLoadQuarantinesStaleAlive(t *testing.T) {
 	if q != 1 {
 		t.Fatalf("quarantined = %d, want 1", q)
 	}
-	if s, _ := p.Get("stale"); s.State != models.StateValidating || !s.Dirty {
-		t.Fatalf("stale record = %+v, want VALIDATING and dirty", s)
+	if s, _ := p.Get("stale"); s.State != models.StateValidating || !s.Dirty || !s.LastSuccess.Equal(stale.LastChecked) {
+		t.Fatalf("stale record = %+v, want VALIDATING, dirty and last_success from last_checked", s)
+	}
+	// A legacy record that worked must be rechecked before new candidates.
+	p.Merge([]models.Proxy{{ID: "candidate", Host: "198.51.100.9", Port: 80, Protocol: models.ProtoHTTP}})
+	var order []string
+	for _, x := range p.Due(now, 10, nil) {
+		order = append(order, x.ID)
+	}
+	if fmt.Sprint(order) != "[fresh stale candidate]" {
+		t.Fatalf("due order = %v, want [fresh stale candidate]", order)
 	}
 	if sel, err := p.GetRandom(PoolFilter{}); err != nil || sel.ID != "fresh" {
 		t.Fatalf("selection = %v, %v; want only the fresh record", sel, err)

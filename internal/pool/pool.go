@@ -448,6 +448,11 @@ func (p *Pool) Load(records []*models.Proxy, now time.Time, freshFor time.Durati
 	for _, r := range records {
 		rec := *r
 		rec.Dirty = false
+		if rec.State == models.StateAlive && rec.LastSuccess.IsZero() {
+			// Stored before last_success existed: an ALIVE record last
+			// succeeded at its last check.
+			rec.LastSuccess = rec.LastChecked
+		}
 		if rec.State == models.StateAlive && now.Sub(lastGood(&rec)) > freshFor {
 			rec.State = models.StateValidating
 			rec.NextCheck = time.Time{}
