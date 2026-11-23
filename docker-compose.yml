@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        VERSION: "1.4.0"
+        VERSION: "1.5.0"
     container_name: proxier
     ports:
       - "127.0.0.1:8080:8080"
@@ -19,6 +19,8 @@ services:
       - SCANNER_MODE=continuous
       - SCANNER_CONTINUOUS_DELAY_SEC=30
       - CHANNEL_BUFFER_SIZE=10000
+      # Four workers reserved for ALIVE rechecks; when they are busy the
+      # rechecks may also use the main workers. Each recheck runs once.
       - KEEPALIVE_WORKERS=4
       - KEEPALIVE_USE_MAIN_CHANNEL=true
     restart: unless-stopped
@@ -27,9 +29,15 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    mem_limit: 512m
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.13.2
     container_name: proxier-prometheus
     ports:
       - "127.0.0.1:9090:9090"
@@ -41,21 +49,28 @@ services:
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=7d
     restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.1.3
     container_name: proxier-grafana
     ports:
       - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=proxier
+      # Set GRAFANA_ADMIN_PASSWORD in .env (see .env.example).
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
     volumes:
       - ./grafana/datasources/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro,Z
       - ./grafana/dashboards/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro,Z
       - ./grafana/dashboards/proxier.json:/etc/grafana/provisioning/dashboards/proxier.json:ro,Z
+      - grafana_data:/var/lib/grafana
     restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
 
 volumes:
   proxier_data:
   prometheus_data:
+  grafana_data:
