@@ -154,7 +154,7 @@ func TestParseTXT(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Scanner{}
+			s := &Scanner{dedupTTL: 30 * time.Minute}
 			result := s.parseTXT([]byte(tt.body), testSrc)
 
 			if len(result) != tt.wantLen {
@@ -183,7 +183,7 @@ func TestParseTXT(t *testing.T) {
 }
 
 func TestParseTXT_ProtocolPropagation(t *testing.T) {
-	s := &Scanner{}
+	s := &Scanner{dedupTTL: 30 * time.Minute}
 	src := models.SourceConfig{
 		URL:      "socks5-source",
 		Protocol: models.ProtoSOCKS5,
@@ -304,7 +304,7 @@ func TestParseJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &Scanner{}
+			s := &Scanner{dedupTTL: 30 * time.Minute}
 			result := s.parseJSON([]byte(tt.body), testSrc)
 
 			if len(result) != tt.wantLen {
@@ -335,7 +335,7 @@ func TestDeduplicate(t *testing.T) {
 	}
 
 	t.Run("new proxy is accepted", func(t *testing.T) {
-		s := &Scanner{}
+		s := &Scanner{dedupTTL: 30 * time.Minute}
 		seen := make(map[string]time.Time)
 
 		proxies := []*models.Proxy{makeProxy("1.2.3.4", 8080)}
@@ -351,7 +351,7 @@ func TestDeduplicate(t *testing.T) {
 	})
 
 	t.Run("proxy within seenTTL is rejected", func(t *testing.T) {
-		s := &Scanner{}
+		s := &Scanner{dedupTTL: 30 * time.Minute}
 		now := time.Now()
 		key := "1.2.3.4:8080"
 		seen := map[string]time.Time{
@@ -367,10 +367,10 @@ func TestDeduplicate(t *testing.T) {
 	})
 
 	t.Run("proxy outside seenTTL is re-accepted", func(t *testing.T) {
-		s := &Scanner{}
+		s := &Scanner{dedupTTL: 30 * time.Minute}
 		now := time.Now()
 		key := "1.2.3.4:8080"
-		oldTime := now.Add(-seenTTL - time.Minute) // 31 min ago, outside 30 min TTL
+		oldTime := now.Add(-s.dedupTTL - time.Minute) // 31 min ago, outside 30 min TTL
 		seen := map[string]time.Time{key: oldTime}
 
 		proxies := []*models.Proxy{makeProxy("1.2.3.4", 8080)}
@@ -385,11 +385,11 @@ func TestDeduplicate(t *testing.T) {
 	})
 
 	t.Run("exactly at seenTTL boundary is re-accepted", func(t *testing.T) {
-		s := &Scanner{}
+		s := &Scanner{dedupTTL: 30 * time.Minute}
 		now := time.Now()
 		key := "5.6.7.8:3128"
 		seen := map[string]time.Time{
-			key: now.Add(-seenTTL + time.Second), // just inside TTL
+			key: now.Add(-s.dedupTTL + time.Second), // just inside TTL
 		}
 
 		proxies := []*models.Proxy{makeProxy("5.6.7.8", 3128)}
@@ -401,7 +401,7 @@ func TestDeduplicate(t *testing.T) {
 	})
 
 	t.Run("empty input returns empty", func(t *testing.T) {
-		s := &Scanner{}
+		s := &Scanner{dedupTTL: 30 * time.Minute}
 		seen := make(map[string]time.Time)
 
 		result := s.deduplicate(nil, seen)
@@ -411,10 +411,10 @@ func TestDeduplicate(t *testing.T) {
 	})
 
 	t.Run("multiple proxies with mixed seen status", func(t *testing.T) {
-		s := &Scanner{}
+		s := &Scanner{dedupTTL: 30 * time.Minute}
 		now := time.Now()
 		seen := map[string]time.Time{
-			"old:8080": now.Add(-seenTTL - time.Hour),  // outside TTL -> accepted
+			"old:8080": now.Add(-s.dedupTTL - time.Hour),  // outside TTL -> accepted
 			"new:8080": now.Add(-time.Minute),          // inside TTL -> rejected
 		}
 
