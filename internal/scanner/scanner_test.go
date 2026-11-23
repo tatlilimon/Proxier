@@ -136,7 +136,14 @@ func TestParseTXT(t *testing.T) {
 			wantPort: 8080,
 		},
 		{
-			name:    "ipv6 bracket notation skipped by simple parser",
+			name:     "ipv6 bracket notation",
+			body:     "[2001:db8::1]:8080",
+			wantLen:  1,
+			wantHost: "2001:db8::1",
+			wantPort: 8080,
+		},
+		{
+			name:    "ipv6 loopback refused by the address policy",
 			body:    "[::1]:8080",
 			wantLen: 0,
 		},
@@ -189,7 +196,7 @@ func TestParseTXT_ProtocolPropagation(t *testing.T) {
 		Protocol: models.ProtoSOCKS5,
 	}
 
-	result := s.parseTXT([]byte("10.0.0.1:1080"), src)
+	result := s.parseTXT([]byte("198.51.100.1:1080"), src)
 	if len(result) != 1 {
 		t.Fatalf("got %d proxies, want 1", len(result))
 	}
@@ -279,14 +286,14 @@ func TestParseJSON(t *testing.T) {
 			wantPort: 8080,
 		},
 		{
-			name:     "port string parsed as number by JSON decoder",
-			body:     `[{"ip":"1.2.3.4","port":"8080"}]`,
-			wantLen:  0,
+			name:    "port string parsed as number by JSON decoder",
+			body:    `[{"ip":"1.2.3.4","port":"8080"}]`,
+			wantLen: 0,
 		},
 		{
-			name:     "no port field",
-			body:     `[{"ip":"1.2.3.4"}]`,
-			wantLen:  0,
+			name:    "no port field",
+			body:    `[{"ip":"1.2.3.4"}]`,
+			wantLen: 0,
 		},
 		{
 			name:    "host is empty string, ip is empty",
@@ -295,9 +302,9 @@ func TestParseJSON(t *testing.T) {
 		},
 		{
 			name:     "host empty, ip has value",
-			body:     `[{"host":"","ip":"10.0.0.1","port":3128}]`,
+			body:     `[{"host":"","ip":"198.51.100.1","port":3128}]`,
 			wantLen:  1,
-			wantHost: "10.0.0.1",
+			wantHost: "198.51.100.1",
 			wantPort: 3128,
 		},
 	}
@@ -331,82 +338,70 @@ func TestParseJSON(t *testing.T) {
 
 func TestDeduplicate(t *testing.T) {
 	makeProxy := func(host string, port int) *models.Proxy {
-		return &models.Proxy{Host: host, Port: port}
+		return &models.Proxy{Host: host, Port: port, Protocol: models.ProtoHTTP}
 	}
+	key := func(host string, port int) string { return dedupKey(makeProxy(host, port)) }
 
-	t.Run("new proxy is accepted", func(t *testing.T) {
+	t.Run("new proxy is accepted and recorded once handed over", func(t *testing.T) {
 		s := &Scanner{dedupTTL: 30 * time.Minute}
 		seen := make(map[string]time.Time)
 
-		proxies := []*models.Proxy{makeProxy("1.2.3.4", 8080)}
-		result := s.deduplicate(proxies, seen)
-
+		result := s.deduplicate([]*models.Proxy{makeProxy("1.2.3.4", 8080)}, seen)
 		if len(result) != 1 {
 			t.Fatalf("got %d proxies, want 1", len(result))
 		}
-		key := "1.2.3.4:8080"
-		if _, ok := seen[key]; !ok {
-			t.Error("proxy should be recorded in seen map")
+		if len(seen) != 0 {
+			t.Fatal("deduplicate must not record candidates before they are handed over")
+		}
+		s.markSeen(result, seen, time.Now())
+		if _, ok := seen[key("1.2.3.4", 8080)]; !ok {
+			t.Error("proxy should be recorded in seen map after markSeen")
 		}
 	})
 
 	t.Run("proxy within seenTTL is rejected", func(t *testing.T) {
 		s := &Scanner{dedupTTL: 30 * time.Minute}
-		now := time.Now()
-		key := "1.2.3.4:8080"
-		seen := map[string]time.Time{
-			key: now.Add(-10 * time.Minute), // 10 min ago, within 30 min TTL
-		}
-
-		proxies := []*models.Proxy{makeProxy("1.2.3.4", 8080)}
-		result := s.deduplicate(proxies, seen)
-
-		if len(result) != 0 {
+		seen := map[string]time.Time{key("1.2.3.4", 8080): time.Now().Add(-10 * time.Minute)}
+		if result := s.deduplicate([]*models.Proxy{makeProxy("1.2.3.4", 8080)}, seen); len(result) != 0 {
 			t.Errorf("got %d proxies, want 0 (within TTL)", len(result))
 		}
 	})
 
 	t.Run("proxy outside seenTTL is re-accepted", func(t *testing.T) {
 		s := &Scanner{dedupTTL: 30 * time.Minute}
-		now := time.Now()
-		key := "1.2.3.4:8080"
-		oldTime := now.Add(-s.dedupTTL - time.Minute) // 31 min ago, outside 30 min TTL
-		seen := map[string]time.Time{key: oldTime}
+		oldTime := time.Now().Add(-s.dedupTTL - time.Minute)
+		seen := map[string]time.Time{key("1.2.3.4", 8080): oldTime}
 
-		proxies := []*models.Proxy{makeProxy("1.2.3.4", 8080)}
-		result := s.deduplicate(proxies, seen)
-
+		result := s.deduplicate([]*models.Proxy{makeProxy("1.2.3.4", 8080)}, seen)
 		if len(result) != 1 {
 			t.Fatalf("got %d proxies, want 1 (outside TTL)", len(result))
 		}
-		if seen[key].Equal(oldTime) {
+		s.markSeen(result, seen, time.Now())
+		if seen[key("1.2.3.4", 8080)].Equal(oldTime) {
 			t.Error("seen timestamp should be updated after re-acceptance")
 		}
 	})
 
-	t.Run("exactly at seenTTL boundary is re-accepted", func(t *testing.T) {
+	t.Run("just inside seenTTL is rejected", func(t *testing.T) {
 		s := &Scanner{dedupTTL: 30 * time.Minute}
-		now := time.Now()
-		key := "5.6.7.8:3128"
-		seen := map[string]time.Time{
-			key: now.Add(-s.dedupTTL + time.Second), // just inside TTL
-		}
-
-		proxies := []*models.Proxy{makeProxy("5.6.7.8", 3128)}
-		result := s.deduplicate(proxies, seen)
-
-		if len(result) != 0 {
+		seen := map[string]time.Time{key("5.6.7.8", 3128): time.Now().Add(-s.dedupTTL + time.Second)}
+		if result := s.deduplicate([]*models.Proxy{makeProxy("5.6.7.8", 3128)}, seen); len(result) != 0 {
 			t.Errorf("got %d proxies, want 0 (within TTL)", len(result))
 		}
 	})
 
 	t.Run("empty input returns empty", func(t *testing.T) {
 		s := &Scanner{dedupTTL: 30 * time.Minute}
-		seen := make(map[string]time.Time)
-
-		result := s.deduplicate(nil, seen)
-		if len(result) != 0 {
+		if result := s.deduplicate(nil, map[string]time.Time{}); len(result) != 0 {
 			t.Errorf("got %d proxies, want 0", len(result))
+		}
+	})
+
+	t.Run("duplicates inside one batch are kept once", func(t *testing.T) {
+		s := &Scanner{dedupTTL: 30 * time.Minute}
+		result := s.deduplicate([]*models.Proxy{makeProxy("1.2.3.4", 80), makeProxy("1.2.3.4", 80)}, map[string]time.Time{})
+		if len(result) != 1 {
+			t.Errorf("got %d proxies, want 1", len(result))
 		}
 	})
 
@@ -414,33 +409,25 @@ func TestDeduplicate(t *testing.T) {
 		s := &Scanner{dedupTTL: 30 * time.Minute}
 		now := time.Now()
 		seen := map[string]time.Time{
-			"old:8080": now.Add(-s.dedupTTL - time.Hour),  // outside TTL -> accepted
-			"new:8080": now.Add(-time.Minute),          // inside TTL -> rejected
+			key("old", 8080): now.Add(-s.dedupTTL - time.Hour), // outside TTL -> accepted
+			key("new", 8080): now.Add(-time.Minute),            // inside TTL -> rejected
 		}
 
-		proxies := []*models.Proxy{
+		result := s.deduplicate([]*models.Proxy{
 			makeProxy("old", 8080),
 			makeProxy("new", 8080),
 			makeProxy("unseen", 8080), // never seen -> accepted
-		}
-		result := s.deduplicate(proxies, seen)
+		}, seen)
 
 		if len(result) != 2 {
 			t.Errorf("got %d proxies, want 2 (old and unseen)", len(result))
 		}
-
-		seenIDs := map[string]bool{}
+		hosts := map[string]bool{}
 		for _, p := range result {
-			seenIDs[p.Host] = true
+			hosts[p.Host] = true
 		}
-		if !seenIDs["old"] {
-			t.Error("'old' should have been accepted (outside TTL)")
-		}
-		if seenIDs["new"] {
-			t.Error("'new' should have been rejected (inside TTL)")
-		}
-		if !seenIDs["unseen"] {
-			t.Error("'unseen' should have been accepted (new)")
+		if !hosts["old"] || hosts["new"] || !hosts["unseen"] {
+			t.Errorf("accepted %v, want old and unseen", hosts)
 		}
 	})
 }

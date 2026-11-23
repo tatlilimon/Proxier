@@ -1,447 +1,383 @@
+// Package validator checks proxies and keeps their state in the pool up to
+// date.
+//
+// Scheduling: every record carries an explicit NextCheck time. A scheduler
+// asks the pool for due records (most important first: ALIVE rechecks, then
+// previously working proxies, new candidates, never-working retries and DEAD
+// retries), marks them in flight and hands them to the workers. A record is
+// never checked twice at the same time and never sent to two queues, so
+// results cannot overlap or arrive stale. Results are applied to the pool's
+// canonical record, which preserves its history.
 package validator
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/json"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
-	"net/url"
-	"strconv"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/tatlilimon/proxier/internal/models"
-	"github.com/tatlilimon/proxier/internal/socks4"
-	"golang.org/x/net/proxy"
 )
 
-// Pool is the subset of pool.Pool that the validator depends on.
+// Pool is the part of pool.Pool the validator depends on.
 type Pool interface {
-	Add(p *models.Proxy)
-	Get(id string) (*models.Proxy, bool)
-	All() []*models.Proxy
+	Update(id string, fn func(rec *models.Proxy)) bool
+	Due(now time.Time, limit int, skip func(id string) bool) []*models.Proxy
 }
 
-// Validator consumes proxy candidates, tests them against a probe URL, and
-// maintains health scores in the shared proxy pool.
+// Option customises a Validator.
+type Option func(*Validator)
+
+// WithRootCAs replaces the trusted roots (tests use their own CA).
+func WithRootCAs(roots *x509.CertPool) Option { return func(v *Validator) { v.rootCAs = roots } }
+
+// WithScheduleInterval sets how often due records are scheduled.
+func WithScheduleInterval(d time.Duration) Option {
+	return func(v *Validator) { v.scheduleInterval = d }
+}
+
+// WithBaselineRefresh sets how often a known routing baseline is refreshed.
+// Zero disables baseline detection (the caller sets it).
+func WithBaselineRefresh(d time.Duration) Option {
+	return func(v *Validator) { v.baselineRefresh = d }
+}
+
+// WithLatencyObserver receives the latency of every successful check.
+func WithLatencyObserver(fn func(time.Duration)) Option {
+	return func(v *Validator) { v.observer = fn }
+}
+
+// WithUserAgent sets the User-Agent of probe requests.
+func WithUserAgent(ua string) Option { return func(v *Validator) { v.userAgent = ua } }
+
+// Validator consumes due records, tests them and applies the results.
 type Validator struct {
+	checker           *Checker
+	pool              Pool
 	workers           int
-	timeout           time.Duration
-	probeURL          string
+	keepaliveWorkers  int
+	keepaliveOverflow bool
 	maxFails          int
 	keepaliveInterval time.Duration
-	pool              Pool
-	httpClient        *http.Client
-	sharedTransport   *http.Transport
+	scheduleInterval  time.Duration
+	baselineRefresh   time.Duration
+	rootCAs           *x509.CertPool
+	userAgent         string
+	observer          func(time.Duration)
+	now               func() time.Time
 
-	checked      atomic.Int64
-	totalLatency atomic.Int64
-	successCount atomic.Int64
-	failureCount atomic.Int64
+	queue          chan models.Proxy
+	keepaliveQueue chan models.Proxy
 
-	selfIP string
+	inflightMu sync.Mutex
+	inflight   map[string]struct{}
+	inFlightN  atomic.Int64
+
+	checked          atomic.Int64
+	successCount     atomic.Int64
+	failureCount     atomic.Int64
+	indeterminate    atomic.Int64
+	successLatencyMs atomic.Int64
+	reasons          map[Reason]*atomic.Int64
 }
 
-// NewValidator creates a Validator with the given configuration and pool.
-func NewValidator(cfg models.ValidatorConfig, pool Pool) *Validator {
+// NewValidator creates a Validator. queueSize is the capacity of the check
+// queue between the scheduler and the workers.
+func NewValidator(cfg models.ValidatorConfig, queueSize int, pool Pool, opts ...Option) (*Validator, error) {
 	v := &Validator{
+		pool:              pool,
 		workers:           cfg.Workers,
-		timeout:           time.Duration(cfg.TimeoutMs) * time.Millisecond,
-		probeURL:          cfg.ProbeURL,
+		keepaliveWorkers:  cfg.KeepaliveWorkers,
+		keepaliveOverflow: cfg.KeepaliveUseMainChannel,
 		maxFails:          cfg.MaxConsecutiveFails,
 		keepaliveInterval: time.Duration(cfg.KeepaliveIntervalSec) * time.Second,
-		pool:              pool,
-		httpClient: &http.Client{
-			Timeout: time.Duration(cfg.TimeoutMs) * time.Millisecond,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		scheduleInterval:  time.Second,
+		baselineRefresh:   30 * time.Minute,
+		now:               time.Now,
+		inflight:          make(map[string]struct{}),
+		reasons:           make(map[Reason]*atomic.Int64, len(FailureReasons)),
+	}
+	for _, r := range FailureReasons {
+		v.reasons[r] = new(atomic.Int64)
+	}
+	if cfg.ExtraCAFile != "" {
+		roots, err := loadRoots(cfg.ExtraCAFile)
+		if err != nil {
+			return nil, err
+		}
+		v.rootCAs = roots
+	}
+	for _, o := range opts {
+		o(v)
+	}
+	if v.workers < 1 {
+		return nil, fmt.Errorf("validator needs at least one worker, got %d", v.workers)
+	}
+	if v.maxFails < 1 {
+		v.maxFails = 1
+	}
+	if v.keepaliveInterval <= 0 {
+		return nil, fmt.Errorf("keepalive interval must be positive")
+	}
+	if queueSize < 1 {
+		queueSize = 1
 	}
 
-	v.sharedTransport = &http.Transport{
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
-		DisableKeepAlives:     false,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+	checker, err := NewChecker(CheckerConfig{
+		Timeout:      time.Duration(cfg.TimeoutMs) * time.Millisecond,
+		ProbeURL:     cfg.ProbeURL,
+		RootCAs:      v.rootCAs,
+		AllowPrivate: cfg.AllowPrivateProxies,
+		UserAgent:    v.userAgent,
+	})
+	if err != nil {
+		return nil, err
 	}
+	v.checker = checker
 
-	v.detectSelfIP()
-
-	return v
+	v.queue = make(chan models.Proxy, queueSize)
+	if v.keepaliveWorkers > 0 {
+		v.keepaliveQueue = make(chan models.Proxy, queueSize)
+	}
+	return v, nil
 }
 
-// Run starts the validator worker pool. It reads proxies from the input
-// channel, validates each one, and keeps the shared pool up to date.
-// Run returns when the input channel is closed and all workers have finished.
-func (v *Validator) Run(ctx context.Context, input <-chan *models.Proxy) error {
-	var wg sync.WaitGroup
-
-	for i := 0; i < v.workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case p, ok := <-input:
-					if !ok {
-						return
-					}
-					v.validateOne(ctx, p)
-				}
-			}
-		}()
+func loadRoots(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading extra CA file: %w", err)
 	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("extra CA file %s contains no PEM certificates", path)
+	}
+	return roots, nil
+}
 
+// Checker returns the side-effect-free check engine (used by POST /validate).
+func (v *Validator) Checker() *Checker { return v.checker }
+
+// Run starts the workers, the scheduler and the routing-baseline loop and
+// blocks until ctx is cancelled and all of them have returned. A check
+// interrupted by cancellation is not counted and changes nothing.
+func (v *Validator) Run(ctx context.Context) error {
+	var wg sync.WaitGroup
+	for i := 0; i < v.workers; i++ {
+		wg.Go(func() { v.work(ctx, v.queue) })
+	}
+	for i := 0; i < v.keepaliveWorkers; i++ {
+		wg.Go(func() { v.work(ctx, v.keepaliveQueue) })
+	}
+	if v.baselineRefresh > 0 {
+		wg.Go(func() { v.checker.RunBaseline(ctx, v.baselineRefresh) })
+	}
+	wg.Go(func() { v.scheduleLoop(ctx) })
 	wg.Wait()
 	return nil
 }
 
-// StartKeepalive periodically re-checks every ALIVE proxy in the pool.
-// This goroutine runs until ctx is cancelled.
-func (v *Validator) StartKeepalive(ctx context.Context) {
-	ticker := time.NewTicker(v.keepaliveInterval)
-	defer ticker.Stop()
-
+func (v *Validator) work(ctx context.Context, q <-chan models.Proxy) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case p := <-q:
+			v.process(ctx, p)
+		}
+	}
+}
+
+func (v *Validator) scheduleLoop(ctx context.Context) {
+	ticker := time.NewTicker(v.scheduleInterval)
+	defer ticker.Stop()
+	for {
+		v.schedule()
+		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
-			for _, p := range v.pool.All() {
-				if p.State != models.StateAlive {
-					continue
-				}
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					v.validateOne(ctx, p)
-				}
-			}
-
-			// Retry stuck VALIDATING proxies: up to 100 per cycle, cooldown 60s.
-			validatingCount := 0
-			for _, p := range v.pool.All() {
-				if validatingCount >= 100 {
-					break
-				}
-				if p.State != models.StateValidating {
-					continue
-				}
-				// Avoid re-validating proxies that were just checked.
-				if time.Since(p.LastChecked) < 60*time.Second {
-					continue
-				}
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					slog.Info("keepalive retrying stuck validating proxy", "address", p.Address(), "fails", p.ConsecutiveFail)
-					v.validateOne(ctx, p)
-					validatingCount++
-				}
-			}
-
-			// Retry recently-dead proxies: up to 50 per cycle, dead within the last hour.
-			deadCount := 0
-			for _, p := range v.pool.All() {
-				if deadCount >= 50 {
-					break
-				}
-				if p.State != models.StateDead {
-					continue
-				}
-				if time.Since(p.LastChecked) > time.Hour {
-					continue
-				}
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					slog.Info("keepalive retrying recently-dead proxy", "address", p.Address())
-					v.validateOne(ctx, p)
-					deadCount++
-				}
-			}
 		}
 	}
 }
 
-// StartKeepaliveWorkers parallelizes keepalive re-validation with dedicated
-// workers and optional main-channel push. When count <= 0 and useMainChannel
-// is false, it falls back to the existing sequential StartKeepalive.
-func (v *Validator) StartKeepaliveWorkers(ctx context.Context, count int, useMainChannel bool, mainCh chan<- *models.Proxy) {
-	if count <= 0 && !useMainChannel {
-		v.StartKeepalive(ctx)
+// schedule moves due records into the queues while they have room. Each
+// record goes to exactly one queue: ALIVE rechecks to the dedicated
+// keepalive workers when they exist (overflowing into the main queue only
+// when keepalive_use_main_channel is set), everything else to the main queue.
+func (v *Validator) schedule() {
+	free := cap(v.queue) - len(v.queue)
+	if v.keepaliveQueue != nil {
+		free += cap(v.keepaliveQueue) - len(v.keepaliveQueue)
+	}
+	if free <= 0 {
 		return
 	}
-
-	keepaliveCh := make(chan *models.Proxy, 5000)
-
-	if count > 0 {
-		for i := 0; i < count; i++ {
-			go func() {
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case p, ok := <-keepaliveCh:
-						if !ok {
-							return
-						}
-						v.validateOne(ctx, p)
-					}
-				}
-			}()
+	for _, p := range v.pool.Due(v.now(), free, v.isInflight) {
+		if !v.markInflight(p.ID) {
+			continue
+		}
+		if !v.enqueue(*p) {
+			v.unmarkInflight(p.ID)
 		}
 	}
+}
 
-	go func() {
-		ticker := time.NewTicker(v.keepaliveInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				aliveProxies := v.collectAliveProxies()
-				slog.Info("keepalive cycle start", "alive_count", len(aliveProxies), "workers", count, "use_main_channel", useMainChannel)
-
-				for _, p := range aliveProxies {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-
-					if count > 0 {
-						keepaliveCh <- p
-					}
-
-					if useMainChannel {
-						select {
-						case mainCh <- p:
-						default:
-						}
-					}
-				}
-
-				// Phase 2: Retry stuck VALIDATING proxies — up to 100 per cycle, cooldown 60s.
-				validatingCount := 0
-				for _, p := range v.pool.All() {
-					if validatingCount >= 100 {
-						break
-					}
-					if p.State != models.StateValidating {
-						continue
-					}
-					if time.Since(p.LastChecked) < 60*time.Second {
-						continue
-					}
-					select {
-					case <-ctx.Done():
-						return
-					default:
-						slog.Info("keepalive retrying stuck validating proxy", "address", p.Address(), "fails", p.ConsecutiveFail)
-						v.validateOne(ctx, p)
-						validatingCount++
-					}
-				}
-
-				// Phase 3: Retry recently-dead proxies — up to 50 per cycle, dead within the last hour.
-				deadCount := 0
-				for _, p := range v.pool.All() {
-					if deadCount >= 50 {
-						break
-					}
-					if p.State != models.StateDead {
-						continue
-					}
-					if time.Since(p.LastChecked) > time.Hour {
-						continue
-					}
-					select {
-					case <-ctx.Done():
-						return
-					default:
-						slog.Info("keepalive retrying recently-dead proxy", "address", p.Address())
-						v.validateOne(ctx, p)
-						deadCount++
-					}
-				}
+func (v *Validator) enqueue(p models.Proxy) bool {
+	if p.State == models.StateAlive && v.keepaliveQueue != nil {
+		select {
+		case v.keepaliveQueue <- p:
+			return true
+		default:
+			if !v.keepaliveOverflow {
+				return false
 			}
 		}
-	}()
+	}
+	select {
+	case v.queue <- p:
+		return true
+	default:
+		return false
+	}
 }
 
-// collectAliveProxies returns a slice of all proxies currently in the ALIVE state.
-func (v *Validator) collectAliveProxies() []*models.Proxy {
-	all := v.pool.All()
-	alive := make([]*models.Proxy, 0, len(all))
-	for _, p := range all {
-		if p.State == models.StateAlive {
-			alive = append(alive, p)
-		}
-	}
-	return alive
+func (v *Validator) isInflight(id string) bool {
+	v.inflightMu.Lock()
+	defer v.inflightMu.Unlock()
+	_, ok := v.inflight[id]
+	return ok
 }
 
-// validateOne tests a single proxy, updates its state and health score, and
-// writes the result back to the pool.
-func (v *Validator) validateOne(ctx context.Context, p *models.Proxy) {
-	p.State = models.StateValidating
-
-	transport, err := v.createTransport(p)
-	if err != nil {
-		slog.Warn("validator transport error", "address", p.Address(), "error", err)
-		v.handleFailure(p)
-		return
+func (v *Validator) markInflight(id string) bool {
+	v.inflightMu.Lock()
+	defer v.inflightMu.Unlock()
+	if _, ok := v.inflight[id]; ok {
+		return false
 	}
+	v.inflight[id] = struct{}{}
+	return true
+}
 
-	// Per-proxy context timeout so a single slow proxy never blocks the worker.
-	reqCtx, cancel := context.WithTimeout(ctx, v.timeout)
-	defer cancel()
+func (v *Validator) unmarkInflight(id string) {
+	v.inflightMu.Lock()
+	defer v.inflightMu.Unlock()
+	delete(v.inflight, id)
+}
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, v.probeURL, nil)
-	if err != nil {
-		slog.Warn("validator request error", "address", p.Address(), "error", err)
-		v.handleFailure(p)
-		return
-	}
+// process checks one record and applies the result.
+func (v *Validator) process(ctx context.Context, p models.Proxy) {
+	v.inFlightN.Add(1)
+	defer v.inFlightN.Add(-1)
+	defer v.unmarkInflight(p.ID)
 
-	client := &http.Client{
-		Transport:     transport,
-		Timeout:       v.timeout,
-		CheckRedirect: v.httpClient.CheckRedirect,
-	}
+	res := v.checker.Check(ctx, p)
+	v.record(p, res)
+}
 
-	start := time.Now()
-	resp, err := client.Do(req)
-	latency := time.Since(start)
-
-	if err != nil {
-		slog.Debug("validator proxy unreachable", "address", p.Address(), "error", err)
-		v.handleFailure(p)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slog.Debug("validator bad status", "address", p.Address(), "status", resp.StatusCode)
-		v.handleFailure(p)
-		return
-	}
-
-	if v.selfIP != "" {
-		originIP := parseOriginIP(resp)
-		if originIP == v.selfIP {
-			slog.Warn("validator proxy NOT routing", "address", p.Address(), "origin", originIP)
-			v.handleFailure(p)
+// record updates the statistics and applies res to the canonical record.
+func (v *Validator) record(p models.Proxy, res Result) {
+	now := v.now()
+	if res.Indeterminate {
+		if res.Reason == ReasonCanceled {
 			return
 		}
+		v.indeterminate.Add(1)
+		retry := min(v.keepaliveInterval, 30*time.Second)
+		v.pool.Update(p.ID, func(rec *models.Proxy) { rec.NextCheck = now.Add(retry) })
+		return
 	}
 
-	p.LatencyMs = int(latency.Milliseconds())
-	p.ConsecutiveOK++
-	p.ConsecutiveFail = 0
-	p.State = models.StateAlive
-	p.HealthScore = v.calcHealthScore(p)
-	p.LastChecked = time.Now()
-
 	v.checked.Add(1)
-	v.totalLatency.Add(latency.Milliseconds())
-	v.successCount.Add(1)
-
-	v.pool.Add(p)
-}
-
-// handleFailure increments the fail counter and transitions to DEAD when the
-// threshold is reached.
-func (v *Validator) handleFailure(p *models.Proxy) {
-	p.ConsecutiveFail++
-	p.LastChecked = time.Now()
-	v.checked.Add(1)
-	v.failureCount.Add(1)
-
-	if p.ConsecutiveFail >= v.maxFails {
-		p.State = models.StateDead
-		p.ConsecutiveOK = 0
-		p.HealthScore = 0
-		slog.Warn("validator proxy marked dead", "address", p.Address(), "consecutive_fails", p.ConsecutiveFail)
+	if res.OK {
+		v.successCount.Add(1)
+		v.successLatencyMs.Add(res.Latency.Milliseconds())
+		if v.observer != nil {
+			v.observer(res.Latency)
+		}
+	} else {
+		v.failureCount.Add(1)
+		if c, ok := v.reasons[res.Reason]; ok {
+			c.Add(1)
+		}
+		slog.Debug("validator check failed", "proxy", p.URL(), "reason", string(res.Reason), "detail", res.Detail)
 	}
 
-	v.pool.Add(p)
+	v.pool.Update(p.ID, func(rec *models.Proxy) {
+		prev := rec.State
+		v.applyResult(rec, res, now)
+		if rec.State == models.StateDead && prev != models.StateDead {
+			slog.Info("validator proxy marked dead", "proxy", rec.URL(), "consecutive_fails", rec.ConsecutiveFail)
+		}
+	})
 }
 
-// createTransport builds an http.Transport that routes through the proxy.
+// applyResult is the state machine for one check result.
 //
-// HTTP/HTTPS proxies use http.ProxyURL. SOCKS5 uses golang.org/x/net/proxy.
-// SOCKS4 uses a custom dialer that speaks the SOCKS4/SOCKS4a protocol directly.
-func (v *Validator) createTransport(p *models.Proxy) (*http.Transport, error) {
-	transport := v.sharedTransport.Clone()
-
-	switch p.Protocol {
-	case models.ProtoHTTP, models.ProtoHTTPS:
-		proxyURL, err := url.Parse(p.URL())
-		if err != nil {
-			return nil, fmt.Errorf("parsing proxy URL: %w", err)
-		}
-		transport.Proxy = http.ProxyURL(proxyURL)
-
-	case models.ProtoSOCKS5:
-		addr := p.Address()
-		dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
-		if err != nil {
-			return nil, fmt.Errorf("creating SOCKS5 dialer: %w", err)
-		}
-		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
-		}
-		transport.Proxy = nil
-
-	case models.ProtoSOCKS4:
-		probeURL, err := url.Parse(v.probeURL)
-		if err != nil {
-			return nil, fmt.Errorf("parsing probe URL: %w", err)
-		}
-		probeHost := probeURL.Hostname()
-		probePort := probeURL.Port()
-		if probePort == "" {
-			if probeURL.Scheme == "https" {
-				probePort = "443"
-			} else {
-				probePort = "80"
-			}
-		}
-		portNum, err := strconv.Atoi(probePort)
-		if err != nil {
-			return nil, fmt.Errorf("invalid probe port %q: %w", probePort, err)
-		}
-
-		proxyAddr := p.Address()
-
-		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return socks4.Dial(ctx, probeHost, portNum, proxyAddr, v.timeout)
-		}
-		transport.Proxy = nil
-
-	default:
-		return nil, fmt.Errorf("unsupported protocol %q", p.Protocol)
+//	success: ALIVE, streak+1, failures reset, next check after the keepalive interval
+//	failure: streak reset; VALIDATING with backoff until max_consecutive_fails,
+//	         then DEAD with a few spaced retries
+func (v *Validator) applyResult(rec *models.Proxy, res Result, now time.Time) {
+	rec.LastChecked = now
+	if res.OK {
+		rec.LatencyMs = int(res.Latency.Milliseconds())
+		rec.ConsecutiveOK++
+		rec.ConsecutiveFail = 0
+		rec.State = models.StateAlive
+		rec.LastSuccess = now
+		rec.DiedAt = time.Time{}
+		rec.HealthScore = v.calcHealthScore(rec)
+		rec.NextCheck = now.Add(v.keepaliveInterval)
+		return
 	}
 
-	return transport, nil
+	rec.ConsecutiveFail++
+	rec.ConsecutiveOK = 0
+	switch {
+	case rec.State == models.StateDead:
+		rec.HealthScore = 0
+		rec.NextCheck = v.deadRetryAt(rec, now)
+	case rec.ConsecutiveFail >= v.maxFails:
+		rec.State = models.StateDead
+		rec.DiedAt = now
+		rec.HealthScore = 0
+		rec.NextCheck = v.deadRetryAt(rec, now)
+	default:
+		rec.State = models.StateValidating
+		rec.HealthScore = v.calcHealthScore(rec)
+		rec.NextCheck = now.Add(v.retryDelay(rec.ConsecutiveFail))
+	}
+}
+
+// retryDelay is the backoff before rechecking a failing (not yet dead) proxy:
+// keepalive/8 (clamped to 10 ms–15 s), doubling per failure, never above the
+// keepalive interval.
+func (v *Validator) retryDelay(fails int) time.Duration {
+	base := min(max(v.keepaliveInterval/8, 10*time.Millisecond), 15*time.Second)
+	d := base
+	for i := 1; i < fails && d < v.keepaliveInterval; i++ {
+		d *= 2
+	}
+	return min(d, v.keepaliveInterval)
+}
+
+// deadRetryMultipliers spaces the retries of a DEAD proxy: 1, 3 and 8
+// keepalive intervals after each failed attempt. After that it is only
+// checked again when a source lists it again.
+var deadRetryMultipliers = []time.Duration{1, 3, 8}
+
+func (v *Validator) deadRetryAt(rec *models.Proxy, now time.Time) time.Time {
+	k := rec.ConsecutiveFail - v.maxFails
+	if k < 0 || k >= len(deadRetryMultipliers) {
+		return time.Time{}
+	}
+	return now.Add(deadRetryMultipliers[k] * v.keepaliveInterval)
 }
 
 // calcHealthScore computes a health score between 0 and 1.
@@ -469,78 +405,52 @@ func (v *Validator) calcHealthScore(p *models.Proxy) float64 {
 	return latencyScore*0.4 + successScore*0.6
 }
 
-// Stats returns validator-level statistics. Both counters are updated with
-// atomic operations so that this method is safe to call concurrently.
-func (v *Validator) Stats() (checkedLastHour int64, avgLatencyMs float64) {
-	checked := v.checked.Load()
-	totalLat := v.totalLatency.Load()
-	if checked == 0 {
-		return 0, 0
-	}
-	return checked, float64(totalLat) / float64(checked)
-}
-
-// DetailedStats returns comprehensive validator statistics.
+// DetailedStats returns validator statistics. AvgLatencyMs is the mean of
+// successful checks only.
 func (v *Validator) DetailedStats() models.ValidatorStats {
 	checked := v.checked.Load()
 	success := v.successCount.Load()
-	failure := v.failureCount.Load()
 
 	var avgLat, rate float64
+	if success > 0 {
+		avgLat = float64(v.successLatencyMs.Load()) / float64(success)
+	}
 	if checked > 0 {
-		avgLat = float64(v.totalLatency.Load()) / float64(checked)
 		rate = float64(success) / float64(checked) * 100
 	}
 
+	reasons := make(map[string]int64)
+	for r, c := range v.reasons {
+		if n := c.Load(); n > 0 {
+			reasons[string(r)] = n
+		}
+	}
+
+	depth := len(v.queue)
+	if v.keepaliveQueue != nil {
+		depth += len(v.keepaliveQueue)
+	}
+
 	return models.ValidatorStats{
-		Workers:      v.workers,
-		TotalChecks:  checked,
-		SuccessCount: success,
-		FailureCount: failure,
-		SuccessRate:  rate,
-		AvgLatencyMs: avgLat,
+		Workers:              v.workers + v.keepaliveWorkers,
+		TotalChecks:          checked,
+		SuccessCount:         success,
+		FailureCount:         v.failureCount.Load(),
+		SuccessRate:          rate,
+		AvgLatencyMs:         avgLat,
+		Indeterminate:        v.indeterminate.Load(),
+		InFlight:             v.inFlightN.Load(),
+		QueueDepth:           depth,
+		FailureReasons:       reasons,
+		RoutingBaselineKnown: v.checker.Baseline().Known(),
 	}
 }
 
-// detectSelfIP fetches our own public IP via the probe URL to detect
-// proxies that accept connections but don't actually route traffic.
-func (v *Validator) detectSelfIP() {
-	client := &http.Client{
-		Timeout: v.timeout,
-		Transport: &http.Transport{
-			TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
-			DisableKeepAlives:  true,
-			TLSHandshakeTimeout: 10 * time.Second,
-		},
+// FailureCounts returns the failure count per reason (for metrics).
+func (v *Validator) FailureCounts() map[Reason]int64 {
+	out := make(map[Reason]int64, len(v.reasons))
+	for r, c := range v.reasons {
+		out[r] = c.Load()
 	}
-
-	resp, err := client.Get(v.probeURL)
-	if err != nil {
-		slog.Warn("failed to detect self IP, routing verification disabled", "error", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	ip := parseOriginIP(resp)
-	if ip == "" {
-		slog.Warn("failed to parse self IP from probe response, routing verification disabled")
-		return
-	}
-
-	v.selfIP = ip
-	slog.Info("self IP detected for routing verification", "ip", ip)
-}
-
-type originResponse struct {
-	Origin string `json:"origin"`
-}
-
-// parseOriginIP extracts the origin IP from an httpbin-style JSON response
-// body. Returns "" on any parse error (caller should treat as indeterminate).
-func parseOriginIP(resp *http.Response) string {
-	var body originResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return ""
-	}
-	return body.Origin
+	return out
 }

@@ -1,22 +1,21 @@
+// Package server is proxier's REST API.
 package server
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"github.com/tatlilimon/proxier/internal/metrics"
 	"github.com/tatlilimon/proxier/internal/models"
+	"github.com/tatlilimon/proxier/internal/netpolicy"
 	"github.com/tatlilimon/proxier/internal/pool"
 	"github.com/tatlilimon/proxier/internal/scanner"
 	"github.com/tatlilimon/proxier/internal/validator"
@@ -26,28 +25,51 @@ import (
 // builds and is overridden to the git tag in Docker builds.
 var Version = "dev"
 
-type Server struct {
-	httpServer *http.Server
-	pool       *pool.Pool
-	validator  *validator.Validator
-	scanner    *scanner.Scanner
-	startTime  time.Time
-	probeURL   string
+const (
+	// maxValidateBody bounds the POST /validate request body.
+	maxValidateBody = 4 << 10
+	// maxConcurrentValidations bounds on-demand checks running at once.
+	maxConcurrentValidations = 8
+)
+
+// StorageStats reports persistence health for /stats.
+type StorageStats interface {
+	Stats() models.StorageStats
 }
 
-func NewServer(
-	cfg models.ServerConfig,
-	p *pool.Pool,
-	v *validator.Validator,
-	s *scanner.Scanner,
-	probeURL string,
-) *Server {
+// Deps are the components the API reads.
+type Deps struct {
+	Pool      *pool.Pool
+	Validator *validator.Validator
+	Scanner   *scanner.Scanner
+	Storage   StorageStats
+	Metrics   http.Handler
+	// AllowPrivate admits private proxy addresses in POST /validate.
+	AllowPrivate bool
+}
+
+// Server serves the REST API.
+type Server struct {
+	httpServer   *http.Server
+	pool         *pool.Pool
+	validator    *validator.Validator
+	scanner      *scanner.Scanner
+	storage      StorageStats
+	allowPrivate bool
+	startTime    time.Time
+	validateSem  chan struct{}
+}
+
+// NewServer builds the API for cfg and deps.
+func NewServer(cfg models.ServerConfig, deps Deps) *Server {
 	srv := &Server{
-		pool:      p,
-		validator: v,
-		scanner:   s,
-		startTime: time.Now(),
-		probeURL:  probeURL,
+		pool:         deps.Pool,
+		validator:    deps.Validator,
+		scanner:      deps.Scanner,
+		storage:      deps.Storage,
+		allowPrivate: deps.AllowPrivate,
+		startTime:    time.Now(),
+		validateSem:  make(chan struct{}, maxConcurrentValidations),
 	}
 
 	mux := http.NewServeMux()
@@ -56,42 +78,58 @@ func NewServer(
 	mux.HandleFunc("GET /rotate", srv.handleRotate)
 	mux.HandleFunc("GET /stats", srv.handleStats)
 	mux.HandleFunc("GET /health", srv.handleHealth)
+	mux.HandleFunc("GET /ready", srv.handleReady)
 	mux.HandleFunc("POST /validate", srv.handleValidate)
-	mux.HandleFunc("GET /metrics", metrics.New(p, s, v, srv.startTime).Handler())
-
-	srv.httpServer = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: srv.loggingMiddleware(mux),
+	if deps.Metrics != nil {
+		mux.Handle("GET /metrics", deps.Metrics)
 	}
 
+	writeTimeout := 30 * time.Second
+	if deps.Validator != nil {
+		writeTimeout = max(writeTimeout, deps.Validator.Checker().Timeout()+10*time.Second)
+	}
+	srv.httpServer = &http.Server{
+		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
+		Handler:           srv.loggingMiddleware(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+	}
 	return srv
 }
 
-func (s *Server) Start() error {
-	slog.Info("server starting", "addr", s.httpServer.Addr)
-	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("server listen: %w", err)
+// Addr is the configured listen address.
+func (s *Server) Addr() string { return s.httpServer.Addr }
+
+// Listen binds the configured address, so a port conflict fails startup
+// before any worker starts.
+func (s *Server) Listen() (net.Listener, error) {
+	l, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("server listen on %s: %w", s.httpServer.Addr, err)
+	}
+	return l, nil
+}
+
+// Serve serves on l until Shutdown. It returns nil after a clean shutdown.
+func (s *Server) Serve(l net.Listener) error {
+	slog.Info("server starting", "addr", l.Addr().String())
+	if err := s.httpServer.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("server: %w", err)
 	}
 	return nil
 }
 
+// Shutdown stops the server gracefully.
 func (s *Server) Shutdown(ctx context.Context) error {
 	slog.Info("server shutting down")
 	return s.httpServer.Shutdown(ctx)
 }
 
-func (s *Server) WaitForShutdown() {
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := s.Shutdown(ctx); err != nil {
-		slog.Error("shutdown error", "error", err)
-	}
-}
+// Handler returns the HTTP handler (for tests).
+func (s *Server) Handler() http.Handler { return s.httpServer.Handler }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,8 +156,7 @@ func (rw *responseWriter) WriteHeader(code int) {
 }
 
 func (s *Server) handleGetProxy(w http.ResponseWriter, r *http.Request) {
-	filter := parseFilterFromQuery(r)
-	proxy, err := s.pool.GetRandom(filter)
+	proxy, err := s.pool.GetRandom(parseFilterFromQuery(r))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "no proxy available: "+err.Error())
 		return
@@ -132,31 +169,19 @@ func (s *Server) handleGetProxies(w http.ResponseWriter, r *http.Request) {
 
 	limit := 10
 	if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 0 {
-		limit = l
-		if limit > 100 {
-			limit = 100
-		}
+		limit = min(l, 100)
 	}
 
-	sortBy := q.Get("sort")
-	format := q.Get("format")
-	filter := parseFilterFromQuery(r)
-
-	proxies := s.pool.GetN(limit, sortBy, filter)
+	proxies := s.pool.GetN(limit, q.Get("sort"), parseFilterFromQuery(r))
 	resp := make([]models.ProxyResponse, 0, len(proxies))
 	for _, p := range proxies {
-		resp = append(resp, proxyToResponse(p, format))
+		resp = append(resp, proxyToResponse(p, q.Get("format")))
 	}
-
-	writeJSON(w, http.StatusOK, models.ProxiesResponse{
-		Count:   len(resp),
-		Proxies: resp,
-	})
+	writeJSON(w, http.StatusOK, models.ProxiesResponse{Count: len(resp), Proxies: resp})
 }
 
 func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
-	filter := parseFilterFromQuery(r)
-	proxy, err := s.pool.GetRoundRobin(filter)
+	proxy, err := s.pool.GetRoundRobin(parseFilterFromQuery(r))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "no proxy available: "+err.Error())
 		return
@@ -165,35 +190,50 @@ func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	poolStats := s.pool.DetailedStats()
-
-	scannerStats := s.scanner.DetailedStats()
-	validatorStats := s.validator.DetailedStats()
-
-	uptimeSec := int64(time.Since(s.startTime).Seconds())
-
 	resp := models.StatsResponse{
-		Pool:      poolStats,
-		Scanner:   scannerStats,
-		Validator: validatorStats,
-		Uptime:    (time.Duration(uptimeSec) * time.Second).String(),
+		Pool:      s.pool.DetailedStats(),
+		Scanner:   s.scanner.DetailedStats(),
+		Validator: s.validator.DetailedStats(),
+		Uptime:    (time.Duration(time.Since(s.startTime).Seconds()) * time.Second).String(),
 		Version:   Version,
 	}
-
+	if s.storage != nil {
+		resp.Storage = s.storage.Stats()
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleHealth is a liveness probe: 200 even with an empty pool.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// handleReady is a readiness probe: 200 only when proxies can be served.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	var reasons []string
+	if s.pool.Size() == 0 {
+		reasons = append(reasons, "no alive proxies")
+	}
+	if !s.validator.Checker().Baseline().Known() {
+		reasons = append(reasons, "routing baseline unknown (leak detection unavailable)")
+	}
+	if s.scanner.DetailedStats().LastRun.IsZero() && s.pool.Len() == 0 {
+		reasons = append(reasons, "first scan not finished")
+	}
+	status := http.StatusOK
+	if len(reasons) > 0 {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, models.ReadyResponse{Ready: len(reasons) == 0, Reasons: reasons})
+}
+
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxValidateBody)
 	var req models.ValidateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-
 	if req.Proxy == "" {
 		writeError(w, http.StatusBadRequest, "proxy field is required")
 		return
@@ -204,19 +244,26 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid proxy format: "+err.Error())
 		return
 	}
-
-	p := &models.Proxy{
-		Host:     host,
-		Port:     port,
-		Protocol: protocol,
+	if err := netpolicy.CheckHost(host, s.allowPrivate); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error()+"; set validator.allow_private_proxies to permit it")
+		return
 	}
 
-	alive, latencyMs := validateProxy(r.Context(), p, s.probeURL)
+	select {
+	case s.validateSem <- struct{}{}:
+		defer func() { <-s.validateSem }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "too many validations in progress, retry later")
+		return
+	}
 
+	p := models.NewCandidate(protocol, host, port, "api", time.Now())
+	res := s.validator.Checker().Check(r.Context(), p)
 	writeJSON(w, http.StatusOK, models.ValidateResponse{
 		Proxy:     req.Proxy,
-		Alive:     alive,
-		LatencyMs: latencyMs,
+		Alive:     res.OK,
+		LatencyMs: int(res.Latency.Milliseconds()),
+		Reason:    string(res.Reason),
 	})
 }
 
@@ -232,20 +279,13 @@ func parseFilterFromQuery(r *http.Request) pool.PoolFilter {
 	if v, err := strconv.Atoi(q.Get("max_latency_ms")); err == nil {
 		maxLatencyMs = v
 	}
-
-	return pool.PoolFilter{
-		Protocol:     protocol,
-		MaxLatencyMs: maxLatencyMs,
-	}
+	return pool.PoolFilter{Protocol: protocol, MaxLatencyMs: maxLatencyMs}
 }
 
 func proxyToResponse(p *models.Proxy, format string) models.ProxyResponse {
-	var addr string
-	switch format {
-	case "hostport":
+	addr := p.URL()
+	if format == "hostport" {
 		addr = p.Address()
-	default:
-		addr = p.URL()
 	}
 	return models.ProxyResponse{
 		Proxy:       addr,
@@ -267,86 +307,45 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, models.ErrorResponse{Error: msg})
 }
 
+// parseProxyString accepts "host:port" (HTTP) or "scheme://host:port" with a
+// supported scheme. IPv6 hosts must be bracketed. The port must be 1-65535.
 func parseProxyString(raw string) (host string, port int, protocol models.Protocol, err error) {
 	raw = strings.TrimSpace(raw)
+	var portStr string
 
 	if strings.Contains(raw, "://") {
-		u, parseErr := url.Parse(raw)
-		if parseErr != nil {
-			err = fmt.Errorf("invalid URL: %w", parseErr)
-			return
+		u, perr := url.Parse(raw)
+		if perr != nil {
+			return "", 0, "", fmt.Errorf("invalid URL: %w", perr)
 		}
-		host = u.Hostname()
-		portStr := u.Port()
+		p, ok := models.ParseScheme(u.Scheme)
+		if !ok {
+			return "", 0, "", fmt.Errorf("unsupported scheme %q (use http, https, socks4 or socks5)", u.Scheme)
+		}
+		if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return "", 0, "", errors.New("only scheme://host:port is accepted")
+		}
+		protocol, host, portStr = p, u.Hostname(), u.Port()
 		if portStr == "" {
-			err = fmt.Errorf("port is required")
-			return
+			return "", 0, "", errors.New("port is required")
 		}
-		port, err = strconv.Atoi(portStr)
-		if err != nil {
-			err = fmt.Errorf("invalid port: %s", portStr)
-			return
+	} else {
+		h, ps, serr := net.SplitHostPort(raw)
+		if serr != nil {
+			return "", 0, "", fmt.Errorf("expected host:port or protocol://host:port: %w", serr)
 		}
-		protocol = models.Protocol(u.Scheme)
-		return
+		protocol, host, portStr = models.ProtoHTTP, h, ps
 	}
 
-	h, pStr, splitErr := net.SplitHostPort(raw)
-	if splitErr != nil {
-		err = fmt.Errorf("expected host:port or protocol://host:port: %w", splitErr)
-		return
+	if host == "" {
+		return "", 0, "", errors.New("host is required")
 	}
-	host = h
-	port, err = strconv.Atoi(pStr)
-	if err != nil {
-		err = fmt.Errorf("invalid port: %s", pStr)
-		return
+	if len(host) > 253 || strings.ContainsAny(host, " \t/@") {
+		return "", 0, "", fmt.Errorf("invalid host %q", host)
 	}
-	protocol = models.ProtoHTTP
-	return
-}
-
-func validateProxy(ctx context.Context, p *models.Proxy, probeURL string) (alive bool, latencyMs int) {
-	if probeURL == "" {
-		probeURL = "http://httpbin.org/ip"
+	port, err = strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, "", fmt.Errorf("invalid port %q (must be 1-65535)", portStr)
 	}
-
-	proxyURL, err := url.Parse(p.URL())
-	if err != nil {
-		return false, 0
-	}
-
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
-		DialContext: (&net.Dialer{
-			Timeout: 10 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout: 10 * time.Second,
-		DisableKeepAlives:   true,
-		IdleConnTimeout:     90 * time.Second,
-		MaxConnsPerHost:     2,
-		MaxIdleConns:        0,
-		MaxIdleConnsPerHost: 0,
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   15 * time.Second,
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
-	if err != nil {
-		return false, 0
-	}
-
-	start := time.Now()
-	resp, err := client.Do(req)
-	latencyMs = int(time.Since(start).Milliseconds())
-
-	if err != nil {
-		return false, latencyMs
-	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode >= 200 && resp.StatusCode < 300, latencyMs
+	return models.NormalizeHost(host), port, protocol, nil
 }

@@ -1,5 +1,12 @@
 // Package pool provides a thread-safe, in-memory proxy pool with weighted
-// random selection, round-robin iteration, and filtered retrieval.
+// random selection, round-robin iteration, filtered retrieval and check
+// scheduling.
+//
+// Ownership model: the pool owns its records. Every method that returns a
+// proxy returns a copy, and every change goes through a pool method that
+// holds the write lock and knows the previous state. Callers can therefore
+// never change a record behind the pool's back, and the state counters always
+// match the records (see Census).
 package pool
 
 import (
@@ -33,107 +40,172 @@ func (f PoolFilter) matches(p *models.Proxy) bool {
 	return true
 }
 
+// Ack identifies the record versions a storage write covered. Only those
+// versions are marked clean, so a change made while the write was running
+// stays dirty and is written by the next flush.
+type Ack struct {
+	versions map[string]uint64
+	deleted  map[string]uint64
+}
+
 // Pool is a concurrent-safe, in-memory proxy pool.
 type Pool struct {
-	mu       sync.RWMutex
-	proxies  map[string]*models.Proxy
-	aliveIDs []string
-	rrIdx    atomic.Uint64
+	mu         sync.RWMutex
+	proxies    map[string]*models.Proxy
+	aliveIDs   []string       // IDs of ALIVE records, for selection
+	alivePos   map[string]int // ID -> index in aliveIDs
+	tombstones map[string]uint64
+	version    uint64
+	rrIdx      atomic.Uint64
 
-	// Atomic counters updated in Add/Remove so DetailedStats avoids a full
-	// proxy iteration.
+	// Counters are written under the write lock and read without it.
 	totalVal      atomic.Int64
 	aliveVal      atomic.Int64
 	validatingVal atomic.Int64
 	deadVal       atomic.Int64
+	discoveredVal atomic.Int64
 
-	// Protocol counts per alive proxy, protected by protoMu to avoid
-	// contention with the main pool lock.
-	protoMu    sync.Mutex
-	protoCount map[string]int64
-
-	// Recent dead timestamps for dead_last_hour calculation.
-	deadTimesMu    sync.Mutex
-	deadTimestamps []time.Time
+	protoCount     map[string]int64 // ALIVE records per protocol; under mu
+	deadTimestamps []time.Time      // deaths in the last hour; under mu
 }
 
 // NewPool returns an initialized Pool.
 func NewPool() *Pool {
 	return &Pool{
 		proxies:    make(map[string]*models.Proxy),
+		alivePos:   make(map[string]int),
+		tombstones: make(map[string]uint64),
 		protoCount: make(map[string]int64),
 	}
 }
 
-// Add inserts or updates a proxy in the pool and adjusts the atomic counters
-// based on state transitions. Re-discovered proxies with accumulated
-// validation state are preserved.
+// Add stores a copy of proxy, inserting or replacing the record. A DISCOVERED
+// record never overwrites an existing record's validation history: it is
+// treated as a rediscovery (see Merge).
 func (p *Pool) Add(proxy *models.Proxy) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	prev, exists := p.proxies[proxy.ID]
-
-	if exists && proxy.State == models.StateDiscovered && prev.State != models.StateDiscovered {
-		proxy.ConsecutiveFail = prev.ConsecutiveFail
-		proxy.ConsecutiveOK = prev.ConsecutiveOK
-		proxy.HealthScore = prev.HealthScore
-		proxy.State = prev.State
-		proxy.LastChecked = prev.LastChecked
-		proxy.FirstSeen = prev.FirstSeen
+	rec := *proxy
+	prev, exists := p.proxies[rec.ID]
+	if exists && rec.State == models.StateDiscovered && prev.State != models.StateDiscovered {
+		p.rediscoverLocked(prev, rec, time.Now())
+		return
 	}
-
-	if !exists {
-		p.totalVal.Add(1)
-	}
-
-	prevState := models.StateDiscovered
-	if exists {
-		prevState = prev.State
-	}
-	newState := proxy.State
-
-	proxy.Dirty = true
-	p.proxies[proxy.ID] = proxy
-
-	p.adjustCounters(prevState, newState, proxy.Protocol, proxy.HealthScore)
-
-	wasAlive := prevState == models.StateAlive
-	isAlive := newState == models.StateAlive
-	if wasAlive != isAlive || !exists {
-		p.rebuildAliveIDs()
-	}
+	p.putLocked(&rec, prev, exists, time.Now())
 }
 
-// Remove deletes a proxy from the pool by ID and updates the counters.
-func (p *Pool) Remove(id string) {
+// Merge adds scanner candidates. Unknown candidates become DISCOVERED records
+// that are due for their first check immediately; known records keep their
+// history, and a DEAD record becomes due for a recheck because a source lists
+// it again. It returns the number of new records.
+func (p *Pool) Merge(candidates []models.Proxy) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	proxy, exists := p.proxies[id]
-	if !exists {
-		return
+	now := time.Now()
+	added := 0
+	for _, c := range candidates {
+		if c.ID == "" {
+			c.ID = models.ProxyID(c.Protocol, c.Host, c.Port)
+		}
+		if prev, ok := p.proxies[c.ID]; ok {
+			p.rediscoverLocked(prev, c, now)
+			continue
+		}
+		rec := c
+		rec.State = models.StateDiscovered
+		rec.NextCheck = time.Time{}
+		if rec.FirstSeen.IsZero() {
+			rec.FirstSeen = now.UTC()
+		}
+		p.putLocked(&rec, nil, false, now)
+		added++
 	}
-	delete(p.proxies, id)
+	return added
+}
 
-	p.totalVal.Add(-1)
-	p.adjustCounters(proxy.State, models.StateDiscovered, proxy.Protocol, proxy.HealthScore)
-
-	if proxy.State == models.StateAlive {
-		p.rebuildAliveIDs()
+// rediscoverLocked applies a source listing an existing record again.
+func (p *Pool) rediscoverLocked(rec *models.Proxy, cand models.Proxy, now time.Time) {
+	changed := false
+	if rec.Source == "" && cand.Source != "" {
+		rec.Source = cand.Source
+		changed = true
+	}
+	if rec.State == models.StateDead && (rec.NextCheck.IsZero() || rec.NextCheck.After(now)) {
+		rec.NextCheck = now
+		changed = true
+	}
+	if changed {
+		p.version++
+		rec.Version = p.version
+		rec.Dirty = true
 	}
 }
 
-// Get returns the proxy with the given ID, if present.
+// Update applies fn to the stored record under the write lock and keeps the
+// counters, the rotation index and the persistence state consistent with the
+// result. fn must not call other Pool methods. The ID and protocol are
+// identity and cannot be changed. It returns false if the record is unknown.
+func (p *Pool) Update(id string, fn func(rec *models.Proxy)) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	rec, ok := p.proxies[id]
+	if !ok {
+		return false
+	}
+	prevState, prevProto := rec.State, rec.Protocol
+	fn(rec)
+	rec.ID, rec.Protocol = id, prevProto
+	p.version++
+	rec.Version = p.version
+	rec.Dirty = true
+	p.transitionLocked(id, prevState, true, rec.State, rec.Protocol, time.Now())
+	return true
+}
+
+// Remove deletes a proxy from the pool by ID. The deletion is reported to
+// storage by the next DirtySnapshot.
+func (p *Pool) Remove(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.removeLocked(id)
+}
+
+func (p *Pool) removeLocked(id string) bool {
+	rec, ok := p.proxies[id]
+	if !ok {
+		return false
+	}
+	delete(p.proxies, id)
+	p.totalVal.Add(-1)
+	if c := p.stateCounter(rec.State); c != nil {
+		c.Add(-1)
+	}
+	if rec.State == models.StateAlive {
+		p.protoDecLocked(rec.Protocol)
+		p.removeAliveLocked(id)
+	}
+	p.version++
+	p.tombstones[id] = p.version
+	return true
+}
+
+// Get returns a copy of the proxy with the given ID, if present.
 func (p *Pool) Get(id string) (*models.Proxy, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	proxy, ok := p.proxies[id]
-	return proxy, ok
+	rec, ok := p.proxies[id]
+	if !ok {
+		return nil, false
+	}
+	cp := *rec
+	return &cp, true
 }
 
-// GetRandom returns a random alive proxy using weighted selection based on
-// health_score. Returns ErrPoolEmpty when no matching proxies exist.
+// GetRandom returns a copy of a random ALIVE proxy using weighted selection
+// based on health_score. Returns ErrPoolEmpty when no matching proxies exist.
 func (p *Pool) GetRandom(filter PoolFilter) (*models.Proxy, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -153,7 +225,7 @@ func (p *Pool) GetRandom(filter PoolFilter) (*models.Proxy, error) {
 		if err != nil {
 			return nil, err
 		}
-		return candidates[idx], nil
+		return copyOf(candidates[idx]), nil
 	}
 
 	threshold, err := cryptoRandFloat64(totalWeight)
@@ -165,14 +237,14 @@ func (p *Pool) GetRandom(filter PoolFilter) (*models.Proxy, error) {
 	for _, proxy := range candidates {
 		cumulative += proxy.HealthScore
 		if cumulative >= threshold {
-			return proxy, nil
+			return copyOf(proxy), nil
 		}
 	}
 
-	return candidates[len(candidates)-1], nil
+	return copyOf(candidates[len(candidates)-1]), nil
 }
 
-// GetRoundRobin returns the next alive proxy using round-robin iteration.
+// GetRoundRobin returns a copy of the next ALIVE proxy in round-robin order.
 func (p *Pool) GetRoundRobin(filter PoolFilter) (*models.Proxy, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -183,30 +255,31 @@ func (p *Pool) GetRoundRobin(filter PoolFilter) (*models.Proxy, error) {
 	}
 
 	idx := p.rrIdx.Add(1) - 1
-	return candidates[idx%uint64(len(candidates))], nil
+	return copyOf(candidates[idx%uint64(len(candidates))]), nil
 }
 
-// GetN returns up to N proxies sorted by the given criteria.
+// GetN returns copies of up to N ALIVE proxies sorted by the given criteria.
 // sort values: "random", "latency", "health_score". Defaults to "random".
 func (p *Pool) GetN(limit int, sortBy string, filter PoolFilter) []*models.Proxy {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	candidates := p.filterAlive(filter)
-	if len(candidates) == 0 {
+	result := make([]*models.Proxy, len(candidates))
+	for i, c := range candidates {
+		result[i] = copyOf(c)
+	}
+	p.mu.RUnlock()
+
+	if len(result) == 0 {
 		return nil
 	}
 
-	result := make([]*models.Proxy, len(candidates))
-	copy(result, candidates)
-
 	switch sortBy {
 	case "latency":
-		sort.Slice(result, func(i, j int) bool {
+		sort.SliceStable(result, func(i, j int) bool {
 			return result[i].LatencyMs < result[j].LatencyMs
 		})
 	case "health_score":
-		sort.Slice(result, func(i, j int) bool {
+		sort.SliceStable(result, func(i, j int) bool {
 			return result[i].HealthScore > result[j].HealthScore
 		})
 	default:
@@ -216,195 +289,443 @@ func (p *Pool) GetN(limit int, sortBy string, filter PoolFilter) []*models.Proxy
 	if limit > 0 && limit < len(result) {
 		result = result[:limit]
 	}
-
 	return result
 }
 
-// Size returns the number of alive proxies in the pool.
+// Size returns the number of ALIVE proxies in the pool.
 func (p *Pool) Size() int {
 	return int(p.aliveVal.Load())
 }
 
-// All returns a copy of every proxy currently in the pool.
+// Len returns the number of records of any state.
+func (p *Pool) Len() int {
+	return int(p.totalVal.Load())
+}
+
+// All returns a copy of every record currently in the pool.
 func (p *Pool) All() []*models.Proxy {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	result := make([]*models.Proxy, 0, len(p.proxies))
-	for _, proxy := range p.proxies {
-		result = append(result, proxy)
+	for _, rec := range p.proxies {
+		result = append(result, copyOf(rec))
 	}
 	return result
 }
 
-// DirtyAll returns copies of every proxy that has been modified since the
-// last persistence flush, then clears the dirty flag.
-func (p *Pool) DirtyAll() []*models.Proxy {
+// Due returns copies of up to limit records whose next check is due at now,
+// most important first: ALIVE rechecks, then records that worked before,
+// then new candidates, then never-working retries, then DEAD retries. Within
+// a group the longest-waiting record comes first. skip, when non-nil,
+// excludes records (for example checks already in flight); it is called
+// under the pool's read lock and must not call back into the pool.
+func (p *Pool) Due(now time.Time, limit int, skip func(id string) bool) []*models.Proxy {
+	if limit <= 0 {
+		return nil
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	result := make([]*models.Proxy, 0, len(p.proxies)/4)
-	for _, proxy := range p.proxies {
-		if proxy.Dirty {
-			cp := *proxy
+	due := make([]*models.Proxy, 0, 64)
+	for id, rec := range p.proxies {
+		if !isDue(rec, now) {
+			continue
+		}
+		if skip != nil && skip(id) {
+			continue
+		}
+		due = append(due, rec)
+	}
+	sort.Slice(due, func(i, j int) bool {
+		ri, rj := priority(due[i]), priority(due[j])
+		if ri != rj {
+			return ri < rj
+		}
+		if !due[i].NextCheck.Equal(due[j].NextCheck) {
+			return due[i].NextCheck.Before(due[j].NextCheck)
+		}
+		return due[i].ID < due[j].ID
+	})
+	if len(due) > limit {
+		due = due[:limit]
+	}
+	out := make([]*models.Proxy, len(due))
+	for i, rec := range due {
+		out[i] = copyOf(rec)
+	}
+	return out
+}
+
+func isDue(rec *models.Proxy, now time.Time) bool {
+	if rec.State == models.StateDead {
+		return !rec.NextCheck.IsZero() && !rec.NextCheck.After(now)
+	}
+	return !rec.NextCheck.After(now)
+}
+
+func priority(rec *models.Proxy) int {
+	switch rec.State {
+	case models.StateAlive:
+		return 0
+	case models.StateValidating:
+		if !rec.LastSuccess.IsZero() {
+			return 1
+		}
+		return 3
+	case models.StateDiscovered:
+		return 2
+	default:
+		return 4
+	}
+}
+
+// DirtySnapshot returns copies of every changed record and the IDs of
+// removed records that storage has not yet acknowledged. Nothing is marked
+// clean here: pass the Ack to Acknowledge after the write succeeds.
+func (p *Pool) DirtySnapshot() (upserts []*models.Proxy, deletes []string, ack Ack) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	ack = Ack{versions: make(map[string]uint64), deleted: make(map[string]uint64)}
+	for id, rec := range p.proxies {
+		if rec.Dirty {
+			cp := *rec
 			cp.Dirty = false
-			result = append(result, &cp)
-			proxy.Dirty = false
+			upserts = append(upserts, &cp)
+			ack.versions[id] = rec.Version
 		}
 	}
-	return result
+	for id, v := range p.tombstones {
+		deletes = append(deletes, id)
+		ack.deleted[id] = v
+	}
+	return upserts, deletes, ack
 }
 
-// SeedCounters recalibrates all atomic state counters to match the actual
-// proxy states in the pool. Call after bulk-loading proxies from storage so
-// counters start from a known-correct baseline when the pool is populated.
-func (p *Pool) SeedCounters() {
+// Acknowledge marks the versions covered by a successful write as clean.
+// Records changed after the snapshot keep their dirty flag.
+func (p *Pool) Acknowledge(ack Ack) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for id, v := range ack.versions {
+		if rec, ok := p.proxies[id]; ok && rec.Version == v {
+			rec.Dirty = false
+		}
+	}
+	for id, v := range ack.deleted {
+		if tv, ok := p.tombstones[id]; ok && tv == v {
+			delete(p.tombstones, id)
+		}
+	}
+}
+
+// Pending returns the number of changes not yet acknowledged by storage.
+func (p *Pool) Pending() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	n := len(p.tombstones)
+	for _, rec := range p.proxies {
+		if rec.Dirty {
+			n++
+		}
+	}
+	return n
+}
 
-	var total, alive, validating, dead int64
-	protoCounts := make(map[string]int64)
+// Load replaces the pool's contents with records read from storage, building
+// the indexes and counters once. A persisted ALIVE record whose last success
+// is older than freshFor is quarantined: it becomes VALIDATING and due now,
+// so it is not served until a check confirms it again. It returns the number
+// of quarantined records.
+func (p *Pool) Load(records []*models.Proxy, now time.Time, freshFor time.Duration) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	for _, proxy := range p.proxies {
+	p.proxies = make(map[string]*models.Proxy, len(records))
+	p.tombstones = make(map[string]uint64)
+	quarantined := 0
+	for _, r := range records {
+		rec := *r
+		rec.Dirty = false
+		if rec.State == models.StateAlive && now.Sub(lastGood(&rec)) > freshFor {
+			rec.State = models.StateValidating
+			rec.NextCheck = time.Time{}
+			rec.Dirty = true
+			quarantined++
+		}
+		p.version++
+		rec.Version = p.version
+		p.proxies[rec.ID] = &rec
+	}
+	p.recountLocked(now)
+	return quarantined
+}
+
+// SeedCounters recalculates every counter and index from the records.
+func (p *Pool) SeedCounters() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.recountLocked(time.Now())
+}
+
+func (p *Pool) recountLocked(now time.Time) {
+	var total, alive, validating, dead, discovered int64
+	p.protoCount = make(map[string]int64)
+	p.aliveIDs = p.aliveIDs[:0]
+	p.alivePos = make(map[string]int)
+	p.deadTimestamps = p.deadTimestamps[:0]
+	cutoff := now.Add(-time.Hour)
+
+	for id, rec := range p.proxies {
 		total++
-		switch proxy.State {
+		switch rec.State {
 		case models.StateAlive:
 			alive++
-			protoCounts[string(proxy.Protocol)]++
+			p.protoCount[string(rec.Protocol)]++
+			p.alivePos[id] = len(p.aliveIDs)
+			p.aliveIDs = append(p.aliveIDs, id)
 		case models.StateValidating:
 			validating++
 		case models.StateDead:
 			dead++
+			if rec.DiedAt.After(cutoff) {
+				p.deadTimestamps = append(p.deadTimestamps, rec.DiedAt)
+			}
+		case models.StateDiscovered:
+			discovered++
 		}
 	}
-
 	p.totalVal.Store(total)
 	p.aliveVal.Store(alive)
 	p.validatingVal.Store(validating)
 	p.deadVal.Store(dead)
-
-	p.protoMu.Lock()
-	p.protoCount = protoCounts
-	p.protoMu.Unlock()
+	p.discoveredVal.Store(discovered)
 }
 
-// DetailedStats returns comprehensive pool statistics. Counts come from
-// atomic counters (no proxy iteration). Protocol counts and health score
-// averages use lightweight, dedicated locks.
+// Prune removes DEAD records that died (or were last checked) before
+// now-retention. It returns the number of removed records.
+func (p *Pool) Prune(now time.Time, retention time.Duration) int {
+	if retention <= 0 {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cutoff := now.Add(-retention)
+	removed := 0
+	for id, rec := range p.proxies {
+		if rec.State != models.StateDead {
+			continue
+		}
+		since := rec.DiedAt
+		if since.IsZero() {
+			since = rec.LastChecked
+		}
+		if since.Before(cutoff) && p.removeLocked(id) {
+			removed++
+		}
+	}
+	return removed
+}
+
+// DemoteStale takes ALIVE records out of rotation when their last success is
+// older than staleAfter (for example because rechecks fell behind). They
+// become VALIDATING and due now. It returns the number of demoted records.
+func (p *Pool) DemoteStale(now time.Time, staleAfter time.Duration) int {
+	if staleAfter <= 0 {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	demoted := 0
+	for _, id := range append([]string(nil), p.aliveIDs...) {
+		rec := p.proxies[id]
+		if now.Sub(lastGood(rec)) <= staleAfter {
+			continue
+		}
+		rec.State = models.StateValidating
+		rec.NextCheck = time.Time{}
+		p.version++
+		rec.Version = p.version
+		rec.Dirty = true
+		p.transitionLocked(id, models.StateAlive, true, models.StateValidating, rec.Protocol, now)
+		demoted++
+	}
+	return demoted
+}
+
+// Census counts records by state by inspecting every record. It is the
+// reference the cheap counters must always agree with.
+func (p *Pool) Census() map[models.ProxyState]int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[models.ProxyState]int)
+	for _, rec := range p.proxies {
+		out[rec.State]++
+	}
+	return out
+}
+
+// DetailedStats returns pool statistics. State counts come from counters
+// that are maintained on every transition.
 func (p *Pool) DetailedStats() models.PoolStats {
 	stats := models.PoolStats{
 		Total:      int(p.totalVal.Load()),
 		Alive:      int(p.aliveVal.Load()),
 		Validating: int(p.validatingVal.Load()),
 		Dead:       int(p.deadVal.Load()),
+		Discovered: int(p.discoveredVal.Load()),
 	}
 
-	// Protocol counts from the lightweight protoMu.
-	p.protoMu.Lock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	stats.Protocols = make(map[string]int, len(p.protoCount))
 	for proto, cnt := range p.protoCount {
 		stats.Protocols[proto] = int(cnt)
 	}
-	p.protoMu.Unlock()
 
-	// Dead-last-hour from the timestamp ring.
-	p.deadTimesMu.Lock()
-	cutoff := time.Now().Add(-1 * time.Hour)
+	cutoff := time.Now().Add(-time.Hour)
 	for _, ts := range p.deadTimestamps {
 		if ts.After(cutoff) {
 			stats.DeadLastHour++
 		}
 	}
-	p.deadTimesMu.Unlock()
 
-	// Avg health score: only iterate alive proxies, not the full map.
-	if stats.Alive > 0 {
-		p.mu.RLock()
+	if n := len(p.aliveIDs); n > 0 {
 		var healthSum float64
 		for _, id := range p.aliveIDs {
-			if proxy, ok := p.proxies[id]; ok {
-				healthSum += proxy.HealthScore
-			}
+			healthSum += p.proxies[id].HealthScore
 		}
-		p.mu.RUnlock()
-		stats.AvgHealthScore = healthSum / float64(stats.Alive)
+		stats.AvgHealthScore = healthSum / float64(n)
 	}
-
 	return stats
 }
 
-// adjustCounters applies atomic counter and protocol-count changes for a
-// state transition. Must be called under the pool write lock.
-func (p *Pool) adjustCounters(from, to models.ProxyState, protocol models.Protocol, healthScore float64) {
-	p.updateStateCounter(from, -1)
-	p.updateStateCounter(to, +1)
-
-	if from == models.StateAlive {
-		p.protoMu.Lock()
-		p.protoCount[string(protocol)]--
-		if p.protoCount[string(protocol)] <= 0 {
-			delete(p.protoCount, string(protocol))
+// putLocked stores rec (owned by the pool from now on).
+func (p *Pool) putLocked(rec, prev *models.Proxy, exists bool, now time.Time) {
+	prevState := models.ProxyState("")
+	if exists {
+		prevState = prev.State
+		if prev.State == models.StateAlive && prev.Protocol != rec.Protocol {
+			// Same ID with a different protocol cannot happen through
+			// ProxyID; keep the protocol counts right regardless.
+			p.protoDecLocked(prev.Protocol)
+			p.protoCount[string(rec.Protocol)]++
 		}
-		p.protoMu.Unlock()
+	} else {
+		p.totalVal.Add(1)
+	}
+	p.version++
+	rec.Version = p.version
+	rec.Dirty = true
+	p.proxies[rec.ID] = rec
+	delete(p.tombstones, rec.ID)
+	p.transitionLocked(rec.ID, prevState, exists, rec.State, rec.Protocol, now)
+}
+
+// transitionLocked updates the counters and the rotation index for a state
+// change of one record.
+func (p *Pool) transitionLocked(id string, from models.ProxyState, existed bool, to models.ProxyState, proto models.Protocol, now time.Time) {
+	if existed && from == to {
+		return
+	}
+	if existed {
+		if c := p.stateCounter(from); c != nil {
+			c.Add(-1)
+		}
+	}
+	if c := p.stateCounter(to); c != nil {
+		c.Add(1)
 	}
 
-	if to == models.StateAlive {
-		p.protoMu.Lock()
-		p.protoCount[string(protocol)]++
-		p.protoMu.Unlock()
+	wasAlive := existed && from == models.StateAlive
+	isAlive := to == models.StateAlive
+	switch {
+	case wasAlive && !isAlive:
+		p.protoDecLocked(proto)
+		p.removeAliveLocked(id)
+	case !wasAlive && isAlive:
+		p.protoCount[string(proto)]++
+		p.alivePos[id] = len(p.aliveIDs)
+		p.aliveIDs = append(p.aliveIDs, id)
 	}
 
-	if to == models.StateDead && from != models.StateDead {
-		p.deadTimesMu.Lock()
-		p.deadTimestamps = append(p.deadTimestamps, time.Now())
-		// Prune timestamps older than 1 hour.
-		cutoff := time.Now().Add(-1 * time.Hour)
+	if to == models.StateDead && (!existed || from != models.StateDead) {
+		cutoff := now.Add(-time.Hour)
 		kept := p.deadTimestamps[:0]
 		for _, ts := range p.deadTimestamps {
 			if ts.After(cutoff) {
 				kept = append(kept, ts)
 			}
 		}
-		p.deadTimestamps = kept
-		p.deadTimesMu.Unlock()
+		p.deadTimestamps = append(kept, now)
 	}
 }
 
-func (p *Pool) updateStateCounter(state models.ProxyState, delta int64) {
+func (p *Pool) protoDecLocked(proto models.Protocol) {
+	p.protoCount[string(proto)]--
+	if p.protoCount[string(proto)] <= 0 {
+		delete(p.protoCount, string(proto))
+	}
+}
+
+func (p *Pool) removeAliveLocked(id string) {
+	pos, ok := p.alivePos[id]
+	if !ok {
+		return
+	}
+	last := len(p.aliveIDs) - 1
+	p.aliveIDs[pos] = p.aliveIDs[last]
+	p.alivePos[p.aliveIDs[pos]] = pos
+	p.aliveIDs = p.aliveIDs[:last]
+	delete(p.alivePos, id)
+}
+
+func (p *Pool) stateCounter(state models.ProxyState) *atomic.Int64 {
 	switch state {
 	case models.StateAlive:
-		p.aliveVal.Add(delta)
+		return &p.aliveVal
 	case models.StateValidating:
-		p.validatingVal.Add(delta)
+		return &p.validatingVal
 	case models.StateDead:
-		p.deadVal.Add(delta)
+		return &p.deadVal
+	case models.StateDiscovered:
+		return &p.discoveredVal
 	}
+	return nil
 }
 
-// Must be called under write lock.
-func (p *Pool) rebuildAliveIDs() {
-	ids := make([]string, 0, len(p.proxies))
-	for _, proxy := range p.proxies {
-		if proxy.State == models.StateAlive {
-			ids = append(ids, proxy.ID)
-		}
-	}
-	p.aliveIDs = ids
-}
-
-// Must be called under read lock.
+// filterAlive must be called under the read lock. It re-checks the state of
+// every indexed record as a defence in depth.
 func (p *Pool) filterAlive(filter PoolFilter) []*models.Proxy {
 	result := make([]*models.Proxy, 0, len(p.aliveIDs))
 	for _, id := range p.aliveIDs {
-		proxy, ok := p.proxies[id]
-		if !ok {
+		rec, ok := p.proxies[id]
+		if !ok || rec.State != models.StateAlive {
 			continue
 		}
-		if filter.matches(proxy) {
-			result = append(result, proxy)
+		if filter.matches(rec) {
+			result = append(result, rec)
 		}
 	}
 	return result
+}
+
+// lastGood is the time of the last successful check, falling back to the
+// last check for records stored before LastSuccess existed.
+func lastGood(rec *models.Proxy) time.Time {
+	if !rec.LastSuccess.IsZero() {
+		return rec.LastSuccess
+	}
+	return rec.LastChecked
+}
+
+func copyOf(rec *models.Proxy) *models.Proxy {
+	cp := *rec
+	return &cp
 }
 
 func cryptoRandInt(n int) (int, error) {

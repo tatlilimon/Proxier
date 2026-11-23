@@ -1,80 +1,119 @@
 // Package socks4 provides a minimal SOCKS4/SOCKS4a CONNECT dialer.
 //
-// It is designed for the proxier validator — it dials the proxy, performs the
-// SOCKS4 handshake, and returns the net.Conn ready for the HTTP exchange.
+// It is designed for the proxier validator: it dials the proxy, performs the
+// SOCKS4 handshake for the requested target, and returns the connection ready
+// for the HTTP exchange.
 package socks4
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"time"
 )
 
-// Dial connects to proxyAddr, performs a SOCKS4/SOCKS4a CONNECT handshake
-// targeting targetHost:targetPort, and returns the underlying net.Conn.
+// ContextDialer is the part of net.Dialer used to reach the proxy.
+type ContextDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// ErrIPv6Target is returned for IPv6 destinations, which SOCKS4 cannot
+// express.
+var ErrIPv6Target = errors.New("SOCKS4 cannot connect to IPv6 destinations")
+
+// DialContext connects to proxyAddr with d, asks the proxy to CONNECT to
+// target ("host:port") and returns the established connection.
 //
-// SOCKS4a (hostname destinations) is detected automatically when targetHost
-// is not a valid IPv4 address.
-func Dial(ctx context.Context, targetHost string, targetPort int, proxyAddr string, timeout time.Duration) (net.Conn, error) {
-	d := net.Dialer{Timeout: timeout}
+// An IPv4 target uses SOCKS4; a host name uses SOCKS4a, so the proxy resolves
+// it. The handshake honours ctx: its deadline bounds a proxy that accepts the
+// connection but never answers, and cancellation aborts it immediately.
+func DialContext(ctx context.Context, d ContextDialer, proxyAddr, target string) (net.Conn, error) {
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, fmt.Errorf("SOCKS4 target %q: %w", target, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("SOCKS4 target port %q is invalid", portStr)
+	}
+
+	req, err := buildRequest(host, port)
+	if err != nil {
+		return nil, err
+	}
+
 	conn, err := d.DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		return nil, fmt.Errorf("SOCKS4 connect to %s: %w", proxyAddr, err)
 	}
 
-	// Build SOCKS4/SOCKS4a CONNECT request.
-	// Format: [VN=4, CD=1, DSTPORT(2 BE), DSTIP(4), USERID\0, (SOCKS4a: HOSTNAME\0)]
-	var req []byte
-	dstIP := net.ParseIP(targetHost)
-	if dstIP != nil && dstIP.To4() != nil {
-		// Standard SOCKS4: destination is an IPv4 address.
-		req = make([]byte, 0, 9)
-		req = append(req, 4, 1) // VN=4, CD=1 (CONNECT)
-		req = append(req, byte(targetPort>>8), byte(targetPort&0xFF))
-		req = append(req, dstIP.To4()...)
-		req = append(req, 0) // empty user ID
-	} else {
-		// SOCKS4a: destination is a hostname; encode as 0.0.0.x.
-		req = make([]byte, 0, 9+len(targetHost)+1)
-		req = append(req, 4, 1) // VN=4, CD=1 (CONNECT)
-		req = append(req, byte(targetPort>>8), byte(targetPort&0xFF))
-		req = append(req, 0, 0, 0, 1) // 0.0.0.x (non-zero last byte signals SOCKS4a)
-		req = append(req, 0)            // empty user ID
-		req = append(req, []byte(targetHost)...)
-		req = append(req, 0) // null terminator for hostname
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			conn.Close()
+			return nil, err
+		}
 	}
+	// Unblock the handshake as soon as ctx is cancelled.
+	stop := context.AfterFunc(ctx, func() {
+		conn.SetDeadline(time.Unix(1, 0))
+	})
 
-	// Set write/read deadline for the handshake.
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	if _, err := conn.Write(req); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("SOCKS4 write request: %w", err)
-	}
-
-	// Read the 8-byte SOCKS4 response: [VN, CD, DSTPORT(2), DSTIP(4)]
 	resp := make([]byte, 8)
-	if _, err := io.ReadFull(conn, resp); err != nil {
+	_, err = conn.Write(req)
+	if err == nil {
+		_, err = io.ReadFull(conn, resp)
+	}
+	if !stop() {
 		conn.Close()
-		return nil, fmt.Errorf("SOCKS4 read response: %w", err)
+		return nil, fmt.Errorf("SOCKS4 handshake with %s: %w", proxyAddr, ctx.Err())
+	}
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("SOCKS4 handshake with %s: %w", proxyAddr, err)
 	}
 
-	// Clear the deadline after handshake so the HTTP exchange can proceed.
-	if err := conn.SetDeadline(time.Time{}); err != nil {
+	// Reply: [VN=0, CD, DSTPORT(2), DSTIP(4)]. Some servers echo VN=4.
+	if resp[0] != 0 && resp[0] != 4 {
 		conn.Close()
-		return nil, err
+		return nil, fmt.Errorf("SOCKS4 reply has version %d", resp[0])
 	}
-
-	// CD (reply code): 90 = granted, 91 = rejected, 92 = identd, 93 = identd mismatch
+	// CD: 90 granted, 91 rejected, 92/93 identd problems.
 	if resp[1] != 90 {
 		conn.Close()
 		return nil, fmt.Errorf("SOCKS4 request rejected: CD=%d", resp[1])
 	}
 
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	return conn, nil
+}
+
+// buildRequest encodes a CONNECT request:
+// [VN=4, CD=1, DSTPORT(2 BE), DSTIP(4), USERID\0, (SOCKS4a: HOSTNAME\0)].
+func buildRequest(host string, port int) ([]byte, error) {
+	ip := net.ParseIP(host)
+	if ip != nil && ip.To4() == nil {
+		return nil, ErrIPv6Target
+	}
+
+	req := make([]byte, 0, 10+len(host))
+	req = append(req, 4, 1, byte(port>>8), byte(port&0xFF))
+	if ip != nil {
+		req = append(req, ip.To4()...)
+		req = append(req, 0) // empty user ID
+		return req, nil
+	}
+	if host == "" || len(host) > 255 {
+		return nil, fmt.Errorf("SOCKS4a host name %q is invalid", host)
+	}
+	// SOCKS4a: 0.0.0.x with non-zero x, then the host name.
+	req = append(req, 0, 0, 0, 1, 0)
+	req = append(req, host...)
+	req = append(req, 0)
+	return req, nil
 }

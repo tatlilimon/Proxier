@@ -9,22 +9,19 @@ import (
 
 // Store defines the persistence interface for proxy records.
 type Store interface {
-	Save(p *models.Proxy) error
-	SaveBatch(proxies []*models.Proxy) error
+	// Apply writes upserts and deletes in one transaction. On error nothing
+	// is written, and the caller keeps the changes for the next attempt.
+	Apply(upserts []*models.Proxy, deletes []string) error
 	LoadAll() ([]*models.Proxy, error)
-	Delete(id string) error
 	Close() error
 }
 
-// New creates a Store backend based on the provided name and path.
-// Supported backends: "sqlite" (default if empty).
+// New creates a Store backend. Only "sqlite" (the default) is implemented.
 func New(backend, path string) (Store, error) {
 	switch strings.ToLower(backend) {
 	case "", "sqlite":
 		return NewSQLiteStore(path)
-	case "json":
-		return nil, fmt.Errorf("json backend not implemented yet")
 	default:
-		return nil, fmt.Errorf("unknown storage backend: %q", backend)
+		return nil, fmt.Errorf("unknown storage backend %q (only \"sqlite\" is supported)", backend)
 	}
 }
