@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -182,5 +183,25 @@ func TestRunContinuousSchedulesAfterCompletionAndStops(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("RunContinuous did not stop during its delay")
+	}
+}
+
+func TestSourceURLsAreRedactedWhereShown(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://user:pw@lists.example/p.txt?api_key=s3cret&protocol=http": "https://lists.example/p.txt?api_key=REDACTED&protocol=http",
+		"https://lists.example/p.txt?protocol=socks5&limit=2000":           "https://lists.example/p.txt?protocol=socks5&limit=2000",
+		"https://lists.example/p.txt?token=abc":                            "https://lists.example/p.txt?token=REDACTED",
+	} {
+		if got := RedactURL(in); got != want {
+			t.Errorf("RedactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	src := models.SourceConfig{URL: "http://127.0.0.1:1/p.txt?token=s3cret", Protocol: models.ProtoHTTP}
+	s := NewScanner([]models.SourceConfig{src}, time.Minute, time.Minute, false)
+	s.fetchAllSources(context.Background())
+	st := s.DetailedStats().Sources[0]
+	if strings.Contains(st.URL, "s3cret") || strings.Contains(st.LastError, "s3cret") || st.LastError == "" {
+		t.Fatalf("source status leaks the token: %+v", st)
 	}
 }

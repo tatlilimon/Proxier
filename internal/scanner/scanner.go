@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -73,9 +74,41 @@ func NewScanner(sources []models.SourceConfig, interval, dedupTTL time.Duration,
 		status:       make(map[string]*models.SourceStatus, len(sources)),
 	}
 	for _, src := range sources {
-		s.status[src.URL] = &models.SourceStatus{URL: src.URL, Protocol: src.Protocol}
+		s.status[src.URL] = &models.SourceStatus{URL: RedactURL(src.URL), Protocol: src.Protocol}
 	}
 	return s
+}
+
+// sensitiveParams are query parameters whose values are masked wherever a
+// source URL is shown (logs, /stats, /metrics): list URLs of paid services
+// often carry an API key.
+var sensitiveParams = []string{"key", "token", "secret", "password", "passwd", "pass", "auth", "sig", "signature", "credential"}
+
+// RedactURL removes user information and masks the values of query
+// parameters that look like credentials, keeping the URL recognisable and
+// distinct per source.
+func RedactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "invalid-url"
+	}
+	u.User = nil
+	q := u.Query()
+	changed := false
+	for name := range q {
+		lower := strings.ToLower(name)
+		for _, s := range sensitiveParams {
+			if strings.Contains(lower, s) {
+				q.Set(name, "REDACTED")
+				changed = true
+				break
+			}
+		}
+	}
+	if changed {
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
 }
 
 // Run fetches all sources immediately and then on every interval tick, until
@@ -184,7 +217,7 @@ func (s *Scanner) fetchAllSources(ctx context.Context) []*models.Proxy {
 			s.recordSource(src, attempt, len(proxies), err)
 			if err != nil {
 				if ctx.Err() == nil {
-					slog.Warn("scanner skipping source", "url", src.URL, "error", err)
+					slog.Warn("scanner skipping source", "url", RedactURL(src.URL), "error", err)
 				}
 				return
 			}
@@ -203,7 +236,7 @@ func (s *Scanner) recordSource(src models.SourceConfig, attempt time.Time, count
 	defer s.mu.Unlock()
 	st, ok := s.status[src.URL]
 	if !ok {
-		st = &models.SourceStatus{URL: src.URL, Protocol: src.Protocol}
+		st = &models.SourceStatus{URL: RedactURL(src.URL), Protocol: src.Protocol}
 		s.status[src.URL] = st
 	}
 	st.LastAttempt = attempt
@@ -228,6 +261,10 @@ func (s *Scanner) fetchSource(ctx context.Context, src models.SourceConfig) ([]*
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = RedactURL(ue.URL)
+		}
 		return nil, fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
@@ -363,7 +400,7 @@ type jsonProxy struct {
 func (s *Scanner) parseJSON(body []byte, src models.SourceConfig) []*models.Proxy {
 	var entries []jsonProxy
 	if err := json.Unmarshal(body, &entries); err != nil {
-		slog.Warn("scanner bad JSON", "url", src.URL, "error", err)
+		slog.Warn("scanner bad JSON", "url", RedactURL(src.URL), "error", err)
 		return nil
 	}
 
