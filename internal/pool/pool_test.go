@@ -12,16 +12,16 @@ func TestAdd(t *testing.T) {
 	earlier := now.Add(-1 * time.Hour)
 
 	tests := []struct {
-		name              string
-		first             *models.Proxy // nil means skip first add
-		second            *models.Proxy
-		wantState         models.ProxyState
-		wantConsecutiveOK int
+		name                string
+		first               *models.Proxy // nil means skip first add
+		second              *models.Proxy
+		wantState           models.ProxyState
+		wantConsecutiveOK   int
 		wantConsecutiveFail int
-		wantHealthScore   float64
-		wantFirstSeen     time.Time
-		wantLastChecked   time.Time
-		wantAliveIDsLen   int
+		wantHealthScore     float64
+		wantFirstSeen       time.Time
+		wantLastChecked     time.Time
+		wantAliveIDsLen     int
 	}{
 		{
 			name:            "new proxy added to pool",
@@ -40,13 +40,13 @@ func TestAdd(t *testing.T) {
 				ID: "xyz", Host: "5.6.7.8", Port: 3128, Protocol: models.ProtoHTTP,
 				State: models.StateDiscovered, FirstSeen: now,
 			},
-			wantState:         models.StateAlive,
-			wantConsecutiveOK: 7,
+			wantState:           models.StateAlive,
+			wantConsecutiveOK:   7,
 			wantConsecutiveFail: 0,
-			wantHealthScore:   0.82,
-			wantFirstSeen:     earlier, // original discovery time preserved
-			wantLastChecked:   now,
-			wantAliveIDsLen:   1,
+			wantHealthScore:     0.82,
+			wantFirstSeen:       earlier, // original discovery time preserved
+			wantLastChecked:     now,
+			wantAliveIDsLen:     1,
 		},
 		{
 			name: "alive overwrites discovered",
@@ -79,11 +79,11 @@ func TestAdd(t *testing.T) {
 				State: models.StateDead, ConsecutiveOK: 0, ConsecutiveFail: 5,
 				HealthScore: 0, LastChecked: now,
 			},
-			wantState:         models.StateDead,
+			wantState:           models.StateDead,
 			wantConsecutiveFail: 5,
-			wantHealthScore:   0,
-			wantLastChecked:   now,
-			wantAliveIDsLen:   0,
+			wantHealthScore:     0,
+			wantLastChecked:     now,
+			wantAliveIDsLen:     0,
 		},
 		{
 			name: "discovered after discovered gets overwritten",
@@ -423,11 +423,11 @@ func TestGetN(t *testing.T) {
 
 func TestStats(t *testing.T) {
 	tests := []struct {
-		name         string
-		proxies      []*models.Proxy
-		wantAlive    int
+		name           string
+		proxies        []*models.Proxy
+		wantAlive      int
 		wantValidating int
-		wantDead     int
+		wantDead       int
 	}{
 		{
 			name:      "empty pool",
@@ -704,10 +704,10 @@ func TestShuffleSlice(t *testing.T) {
 
 func TestPoolFilter(t *testing.T) {
 	tests := []struct {
-		name     string
-		filter   PoolFilter
-		proxy    *models.Proxy
-		want     bool
+		name   string
+		filter PoolFilter
+		proxy  *models.Proxy
+		want   bool
 	}{
 		{
 			name:   "empty filter matches everything",

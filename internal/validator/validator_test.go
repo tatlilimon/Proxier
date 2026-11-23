@@ -66,13 +66,13 @@ func TestCalcHealthScore(t *testing.T) {
 			name:          "mid latency 1ms above 100",
 			latencyMs:     101,
 			consecutiveOK: 10,
-			want:          (1.0 - 1.0/4900.0)*0.4 + 1.0*0.6,
+			want:          (1.0-1.0/4900.0)*0.4 + 1.0*0.6,
 		},
 		{
 			name:          "mid latency 1ms below 5000",
 			latencyMs:     4999,
 			consecutiveOK: 10,
-			want:          (1.0 - 4899.0/4900.0)*0.4 + 1.0*0.6,
+			want:          (1.0-4899.0/4900.0)*0.4 + 1.0*0.6,
 		},
 		{
 			name:          "latency at midpoint (2550ms), streak 0",
