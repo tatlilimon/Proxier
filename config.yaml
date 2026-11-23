@@ -67,8 +67,8 @@ validator:
   keepalive_use_main_channel: false # Push keepalive re-checks through main validator channel
 
 storage:
-  backend: sqlite             # sqlite | json
-  path: "./proxies.db"        # File path for sqlite/json
+  backend: sqlite             # only sqlite is supported
+  path: "./proxies.db"        # SQLite file
 
 # Built-in proxy sources (these are always loaded)
 # Additional sources can be added via PROXY_SOURCES env var (comma-separated URLs)
