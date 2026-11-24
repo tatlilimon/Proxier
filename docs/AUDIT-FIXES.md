@@ -41,6 +41,7 @@ All tests run offline against local fixtures (`internal/fakeproxy`): `go test -r
 
 ## Dependencies
 
-- `golang.org/x/net` is now v0.57.0 (the audit flagged GO-2026-5026 in v0.54.0; fixed in v0.55.0).
-- `github.com/prometheus/client_golang` v1.24.1 was added (the newest release that supports Go 1.25).
-- `govulncheck` v1.3.0 on this branch: no reachable vulnerabilities in required modules. It reports standard-library vulnerabilities for the **Go 1.25.10** toolchain used for the scan; they are fixed in Go 1.25.11–1.25.13. Build with Go 1.25.13 or newer; the Docker image uses the latest 1.25 patch release.
+- `golang.org/x/net` is now v0.60.0. The audit flagged GO-2026-5026 in v0.54.0; a later advisory affects v0.57.0 and is fixed in v0.60.0, which requires Go 1.26.
+- The module now requires **Go 1.26**. The Go 1.25 line has reachable standard-library vulnerabilities (`net/http`, `net/textproto`, `crypto/tls`, `crypto/x509`, including GO-2026-6603 to GO-2026-6859) that are fixed only in Go 1.26.9–1.26.11. CI uses the latest 1.26 patch release and the Docker image uses `golang:1.26-alpine`.
+- `github.com/prometheus/client_golang` v1.24.1 was added.
+- `govulncheck` v1.3.0 with Go 1.26.11 is part of CI.

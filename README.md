@@ -23,7 +23,7 @@ curl http://localhost:8080/stats | jq  # pool stats
 
 ### Native
 
-Build with Go **1.25.13 or newer**: older 1.25 toolchains carry standard-library vulnerabilities that `govulncheck` reports as reachable (for example GO-2026-5026 in `net/http`). The Docker image always uses the latest 1.25 patch release.
+Build with Go **1.26.11 or newer**. The module requires Go 1.26, and the Go 1.25 line carries standard-library vulnerabilities that `govulncheck` reports as reachable and that are fixed only in Go 1.26. If your installed Go is older and `GOTOOLCHAIN` is `local`, run `GOTOOLCHAIN=go1.26.11 go build ...` (Go downloads that toolchain once) or install Go 1.26. The Docker image always uses the latest 1.26 patch release.
 
 ```bash
 go build -o proxier ./cmd/proxier/
